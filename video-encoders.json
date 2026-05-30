@@ -742,30 +742,5 @@
             "dpx"
         ],
         "isImage": true
-    },
-    {
-        "id": "h265-main10-win-nvidia",
-        "encoder": "H265",
-        "profile": "Lossless",
-        "allowsAlpha": 0,
-        "gpu": "nvidia",
-        "ffmpegOpts": "-c:v hevc_nvenc -profile:v main10 -rc constqp -qp 0 -pix_fmt p010le -b_ref_mode disabled -tag:v hvc1 -g 30",
-        "ext": [
-            "mov",
-            "mkv",
-            "mp4"
-        ],
-        "maxBitRate": 2000,
-        "os": "windows|linux",
-        "device": "nvidia|tesla",
-        "minSize": [
-            129,
-            129
-        ],
-        "maxSize": [
-            8192,
-            8192
-        ],
-        "maxBitDepth": 12
     }
 ]
