@@ -216,9 +216,9 @@
             ]
         },
         "ext": [
-            "mov",
+            "mp4",
             "mkv",
-            "mp4"
+            "mov"
         ],
         "maxBitRate": 2000,
         "os": "windows|linux",
@@ -256,9 +256,9 @@
             ]
         },
         "ext": [
-            "mov",
+            "mp4",
             "mkv",
-            "mp4"
+            "mov"
         ],
         "maxBitRate": 2000,
         "os": "windows|linux",
@@ -296,9 +296,9 @@
             ]
         },
         "ext": [
-            "mov",
+            "mp4",
             "mkv",
-            "mp4"
+            "mov"
         ],
         "maxBitRate": 2000,
         "os": "windows|linux",
@@ -320,9 +320,9 @@
         "allowsAlpha": 0,
         "ffmpegOpts": "-c:v h264_qsv -profile:v high -preset medium -max_frame_size 65534 -pix_fmt nv12 -g 30",
         "ext": [
-            "mov",
+            "mp4",
             "mkv",
-            "mp4"
+            "mov"
         ],
         "autoBitsPerPixel": "1.0",
         "maxBitRate": 2000,
@@ -344,9 +344,9 @@
         "allowsAlpha": 0,
         "ffmpegOpts": "-c:v hevc_qsv -profile:v main -preset medium -max_frame_size 65534 -pix_fmt nv12 -g 30",
         "ext": [
-            "mov",
+            "mp4",
             "mkv",
-            "mp4"
+            "mov"
         ],
         "autoBitsPerPixel": "0.8",
         "maxBitRate": 2000,
@@ -368,9 +368,9 @@
         "allowsAlpha": 0,
         "ffmpegOpts": "-c:v hevc_qsv -profile:v main10 -preset medium -max_frame_size 65534 -pix_fmt p010le -g 30",
         "ext": [
-            "mov",
+            "mp4",
             "mkv",
-            "mp4"
+            "mov"
         ],
         "autoBitsPerPixel": "1.0",
         "maxBitRate": 2000,
@@ -408,9 +408,9 @@
             ]
         },
         "ext": [
-            "mkv",
+            "mp4",
             "webm",
-            "mp4"
+            "mkv"
         ],
         "os": "windows|linux",
         "device": "nvidia",
@@ -449,9 +449,9 @@
             ]
         },
         "ext": [
-            "mkv",
+            "mp4",
             "webm",
-            "mp4"
+            "mkv"
         ],
         "os": "windows|linux",
         "device": "nvidia",
