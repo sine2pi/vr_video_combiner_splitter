@@ -105,7 +105,7 @@ def get_ext_from_codec(out_codec, original_ext):
         return "." + CODEC_OPTIONS_DICT[out_codec].get("ext", [original_ext.lstrip('.')])[0]
     return original_ext
 
-def split_video(input_path, mode, output_dir, conversion="none", log_callback=None, process_callback=None, bitrate="80M", fps=None, height=None, width=None, out_codec="h265-main10-win-nvidia"):
+def split_video(input_path, mode, output_dir, conversion="none", log_callback=None, process_callback=None, bitrate="100M", fps=None, height=None, width=None, out_codec="h265-main10-win-nvidia"):
 
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -232,7 +232,7 @@ def split_video(input_path, mode, output_dir, conversion="none", log_callback=No
 
     return True
     
-def combine_video(input_path_1, input_path_2, mode, output_path, conversion="none", log_callback=None, process_callback=None, bitrate="80M", mask_path=None, fps=None, height=None, width=None, out_codec="h265-main10-win-nvidia"):
+def combine_video(input_path_1, input_path_2, mode, output_path, conversion="none", log_callback=None, process_callback=None, bitrate="100M", mask_path=None, fps=None, height=None, width=None, out_codec="h265-main10-win-nvidia"):
 
     if log_callback: log_callback(f"Combining {input_path_1} and {input_path_2} into {output_path} (Mode: {mode}, Conv: {conversion})")
 
@@ -284,7 +284,7 @@ def combine_video(input_path_1, input_path_2, mode, output_path, conversion="non
         raise ValueError(f"Unknown combine mode: {mode}")
 
     if mask_path is not None:
-        filter_complex = f"{base_filter}[stacked];[stacked][1:v]overlay=0:0,fps={fps},setpts=N/({fps}*TB),scale=w={width}:h={height}:flags=bicubic[v]"
+        filter_complex = f"{base_filter}[stacked];[1:v][stacked]scale2ref[mask][stacked_ref];[stacked_ref][mask]overlay=0:0,fps={fps},setpts=N/({fps}*TB),scale=w={width}:h={height}:flags=bicubic[v]"
     else:
         filter_complex = f"{base_filter},fps={fps},setpts=N/({fps}*TB),scale=w={width}:h={height}:flags=bicubic[v]"
 
@@ -301,7 +301,7 @@ def combine_video(input_path_1, input_path_2, mode, output_path, conversion="non
     run_process(cmd, log_callback, process_callback)
     return True
 
-def tb_to_sbs(input_path, output_path, conversion="none", log_callback=None, process_callback=None, bitrate="80M", operation_mode="custom_tb_to_sbs", mask_path=None, fps=None, height=None, width=None, out_codec="h265-main10-win-nvidia"):
+def tb_to_sbs(input_path, output_path, conversion="none", log_callback=None, process_callback=None, bitrate="100M", operation_mode="custom_tb_to_sbs", mask_path=None, fps=None, height=None, width=None, out_codec="h265-main10-win-nvidia"):
     if log_callback: log_callback(f"Converting video for {input_path} (conv={conversion}, op={operation_mode})")
     
     fps = frame_rate(input_path) if not have(fps) else fps
@@ -378,7 +378,7 @@ def tb_to_sbs(input_path, output_path, conversion="none", log_callback=None, pro
         )
 
     if mask_path is not None:
-        filter_complex = f"{base_filter}[stacked];[stacked][1:v]overlay=0:0,fps={fps},setpts=N/({fps}*TB),scale=w={width}:h={height}:flags=bicubic[v]"
+        filter_complex = f"{base_filter}[stacked];[1:v][stacked]scale2ref[mask][stacked_ref];[stacked_ref][mask]overlay=0:0,fps={fps},setpts=N/({fps}*TB),scale=w={width}:h={height}:flags=bicubic[v]"
     else:
         filter_complex = f"{base_filter},fps={fps},setpts=N/({fps}*TB),scale=w={width}:h={height}:flags=bicubic[v]"
     
@@ -395,7 +395,7 @@ def tb_to_sbs(input_path, output_path, conversion="none", log_callback=None, pro
     run_process(cmd, log_callback, process_callback)
     return True
 
-def batch_tb_to_sbs(input_dir, output_dir=None, conversion="none", log_callback=None, process_callback=None, bitrate="80M", operation_mode="custom_tb_to_sbs", mask_path=None, fps=None, height=None, width=None, out_codec="h265-main10-win-nvidia"):
+def batch_tb_to_sbs(input_dir, output_dir=None, conversion="none", log_callback=None, process_callback=None, bitrate="100M", operation_mode="custom_tb_to_sbs", mask_path=None, fps=None, height=None, width=None, out_codec="h265-main10-win-nvidia"):
 
     width = 'iw' if not have(width) else width
     height = 'ih' if not have(height) else height  
@@ -602,7 +602,7 @@ class VRSplitCombineApp:
         frame_bitrate = ttk.Frame(self.tab_split)
         frame_bitrate.pack(fill='x', pady=5)
         ttk.Label(frame_bitrate, text=get_text('lbl_bitrate')).pack(side='left')
-        self.split_bitrate_var = tk.StringVar(value="80M")
+        self.split_bitrate_var = tk.StringVar(value="100M")
         ttk.Entry(frame_bitrate, textvariable=self.split_bitrate_var, width=10).pack(side='left', padx=5)
         
         ttk.Label(frame_bitrate, text="Output Codec:").pack(side='left', padx=(10, 0))
@@ -681,7 +681,7 @@ class VRSplitCombineApp:
         frame_bitrate = ttk.Frame(self.tab_combine)
         frame_bitrate.pack(fill='x', pady=5)
         ttk.Label(frame_bitrate, text=get_text('lbl_bitrate')).pack(side='left')
-        self.combine_bitrate_var = tk.StringVar(value="80M")
+        self.combine_bitrate_var = tk.StringVar(value="100M")
         ttk.Entry(frame_bitrate, textvariable=self.combine_bitrate_var, width=10).pack(side='left', padx=5)
         
         ttk.Label(frame_bitrate, text="Output Codec:").pack(side='left', padx=(10, 0))
@@ -749,7 +749,7 @@ class VRSplitCombineApp:
         frame_bitrate = ttk.Frame(self.tab_convert)
         frame_bitrate.pack(fill='x', pady=5)
         ttk.Label(frame_bitrate, text=get_text('lbl_bitrate')).pack(side='left')
-        self.convert_bitrate_var = tk.StringVar(value="80M")
+        self.convert_bitrate_var = tk.StringVar(value="100M")
         ttk.Entry(frame_bitrate, textvariable=self.convert_bitrate_var, width=10).pack(side='left', padx=5)
         
         ttk.Label(frame_bitrate, text="Output Codec:").pack(side='left', padx=(10, 0))
@@ -796,7 +796,7 @@ class VRSplitCombineApp:
         self.proc_convert = None
 
     def browse_file(self, var):
-        f = filedialog.askopenfilename(filetypes=[("Video files", "*.mp4 *.mkv *.avi *.mov"), ("All files", "*.*")])
+        f = filedialog.askopenfilename(filetypes=[("Video files", "*.mp4 *.mkv *.avi *.mov *.webm"), ("All files", "*.*")])
         if f: var.set(f)
 
     def browse_dir(self, var):
