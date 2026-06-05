@@ -1,9 +1,6 @@
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-import os
-import threading
-import subprocess
-import json
+import os, threading, subprocess, json
 
 def have(a):
     return a is not None and str(a).strip() != ""
