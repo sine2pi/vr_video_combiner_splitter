@@ -137,7 +137,7 @@ def split_video(input_path, mode, output_dir, conversion="none", log_callback=No
     fisheye_suffix = ""
     if conversion == "to_fisheye":
         v360_filter = f",v360=hequirect:fisheye{dim_str}"
-        fisheye_suffix = "_FE180"
+        fisheye_suffix = "_fisheye"
     elif conversion == "to_hequirect":
         v360_filter = f",v360=fisheye:hequirect{dim_str}"
         fisheye_suffix = "_hequirect"
@@ -299,21 +299,21 @@ def combine_video(input_path_1, input_path_2, mode, output_path, conversion="non
     run_process(cmd, log_callback, process_callback)
     return True
 
-def tb_to_lr(input_path, output_path, conversion="none", log_callback=None, process_callback=None, bitrate="100M", operation_mode="custom_tb_to_lr", mask_path=None, fps=None, height=None, width=None, out_codec="h265-main10-win-nvidia"):
+def tb_to_sbs(input_path, output_path, conversion="none", log_callback=None, process_callback=None, bitrate="100M", operation_mode="custom_tb_to_sbs", mask_path=None, fps=None, height=None, width=None, out_codec="h265-main10-win-nvidia"):
     if log_callback: log_callback(f"Converting video for {input_path} (conv={conversion}, op={operation_mode})")
     
     fps = frame_rate(input_path) if not have(fps) else fps
     codec = vcodec(input_path)
     w_in, h_in = vresolution(input_path)
     wi, hi = w_in, h_in
-    if operation_mode == "lr_to_lr":
+    if operation_mode == "sbs_to_sbs":
         wi = w_in // 2 if w_in > 0 else 0
-    elif operation_mode in ("tb_to_tb", "tb_to_lr"):
+    elif operation_mode in ("tb_to_tb", "tb_to_sbs"):
         wi = w_in // 2 if w_in > 0 else 0
         hi = h_in // 2 if h_in > 0 else 0
-    elif operation_mode == "lr_to_tb":
+    elif operation_mode == "sbs_to_tb":
         wi = w_in // 2 if w_in > 0 else 0
-    else: # custom_tb_to_lr
+    else: # custom_tb_to_sbs
         wi = w_in // 2 if w_in > 0 else 0
         hi = h_in // 2 if h_in > 0 else 0
         
@@ -345,7 +345,7 @@ def tb_to_lr(input_path, output_path, conversion="none", log_callback=None, proc
         v360_filter = f",v360=fisheye:sg:v_fov=60:h_fov=60{dim_str}"
         
     base_filter = ""
-    if operation_mode == "lr_to_lr":
+    if operation_mode == "sbs_to_sbs":
         base_filter = (
             f"[0:v]crop=iw/2:ih:0:0{v360_filter}[left];"
             f"[0:v]crop=iw/2:ih:iw/2:0{v360_filter}[right];"
@@ -357,19 +357,19 @@ def tb_to_lr(input_path, output_path, conversion="none", log_callback=None, proc
             f"[0:v]crop=iw/2:ih/2:iw/4:ih/2{v360_filter}[bottom];"
             f"[top][bottom]vstack=inputs=2"
         )
-    elif operation_mode == "tb_to_lr":
+    elif operation_mode == "tb_to_sbs":
         base_filter = (
             f"[0:v]crop=iw/2:ih/2:iw/4:0{v360_filter}[top];"
             f"[0:v]crop=iw/2:ih/2:iw/4:ih/2{v360_filter}[bottom];"
             f"[top][bottom]hstack=inputs=2"
         )
-    elif operation_mode == "lr_to_tb":
+    elif operation_mode == "sbs_to_tb":
         base_filter = (
             f"[0:v]crop=iw/2:ih:0:0{v360_filter}[left];"
             f"[0:v]crop=iw/2:ih:iw/2:0{v360_filter}[right];"
             f"[left][right]vstack=inputs=2"
         )
-    else: # custom_tb_to_lr
+    else: # custom_tb_to_sbs
         base_filter = (
             f"[0:v]crop=iw/2:ih/2:iw/4:0{v360_filter}[left];"
             f"[0:v]crop=iw/2:ih/2:iw/4:ih/2{v360_filter}[right];"
@@ -394,7 +394,7 @@ def tb_to_lr(input_path, output_path, conversion="none", log_callback=None, proc
     run_process(cmd, log_callback, process_callback)
     return True
 
-def batch_tb_to_lr(input_dir, output_dir=None, conversion="none", log_callback=None, process_callback=None, bitrate="100M", operation_mode="custom_tb_to_lr", mask_path=None, fps=None, height=None, width=None, out_codec="h265-main10-win-nvidia"):
+def batch_tb_to_sbs(input_dir, output_dir=None, conversion="none", log_callback=None, process_callback=None, bitrate="100M", operation_mode="custom_tb_to_sbs", mask_path=None, fps=None, height=None, width=None, out_codec="h265-main10-win-nvidia"):
 
     width = 'iw' if not have(width) else width
     height = 'ih' if not have(height) else height  
@@ -408,20 +408,20 @@ def batch_tb_to_lr(input_dir, output_dir=None, conversion="none", log_callback=N
         return False
         
     for input_path in mp4_files:
-        if "_lr" in input_path or "_FE180" in input_path or "_hequirect" in input_path or ".restored" in input_path:
+        if "_sbs" in input_path or "_fisheye" in input_path or "_hequirect" in input_path or ".restored" in input_path:
             continue
             
         filename = os.path.splitext(os.path.basename(input_path))[0]
         out_dir = output_dir if output_dir else input_dir
         
         suffix = ""
-        if operation_mode in ("lr_to_tb", "tb_to_tb"):
+        if operation_mode in ("sbs_to_tb", "tb_to_tb"):
             suffix += "_tb"
         else:
-            suffix += "_lr"
+            suffix += "_sbs"
             
         if conversion == "to_fisheye":
-            suffix = "_FE180" + suffix
+            suffix = "_fisheye" + suffix
         elif conversion == "to_hequirect":
             suffix = "_hequirect" + suffix
         elif conversion == "heq_to_flat" or conversion == "fish_to_flat":
@@ -434,7 +434,7 @@ def batch_tb_to_lr(input_dir, output_dir=None, conversion="none", log_callback=N
             if log_callback: log_callback(f"Skipping {os.path.basename(input_path)}, output {os.path.basename(output_path)} already exists.")
             continue
             
-        tb_to_lr(input_path, output_path, conversion=conversion, log_callback=log_callback, process_callback=process_callback, bitrate=bitrate, operation_mode=operation_mode, mask_path=mask_path, fps=fps, height=height, width=width, out_codec=out_codec)
+        tb_to_sbs(input_path, output_path, conversion=conversion, log_callback=log_callback, process_callback=process_callback, bitrate=bitrate, operation_mode=operation_mode, mask_path=mask_path, fps=fps, height=height, width=width, out_codec=out_codec)
         
     if log_callback: log_callback("Batch conversion finished.")
     return True
@@ -470,7 +470,7 @@ TRANSLATIONS = {
         'lbl_output_file': "Output File (Optional):",
         'btn_save': "Save As...",
         'grp_combine_mode': "Combine Mode",
-        'mode_lr': "Side-by-Side (Left-Right)",
+        'mode_sbs': "Side-by-Side (Left-Right)",
         'mode_ou': "Over-Under (Top-Bottom)",
         
         'msg_error_input_file': "Please select a valid input file.",
@@ -493,11 +493,11 @@ TRANSLATIONS = {
         'conv_fish_to_flat': "To Flat (Fisheye -> Rectilinear Wide)",
         'lbl_bitrate': "Bitrate:",
         'grp_convert_op': "Operation Mode",
-        'op_custom_tb_lr': "Custom Top-Bottom (25% cropped) to lr",
-        'op_lr_lr': "Standard lr (Projection Convert Only)",
+        'op_custom_tb_sbs': "Custom Top-Bottom (25% cropped) to SBS",
+        'op_sbs_sbs': "Standard SBS (Projection Convert Only)",
         'op_tb_tb': "Standard Top-Bottom (Projection Convert Only)",
-        'op_tb_lr': "Standard Top-Bottom to lr",
-        'op_lr_tb': "Standard lr to Top-Bottom"
+        'op_tb_sbs': "Standard Top-Bottom to SBS",
+        'op_sbs_tb': "Standard SBS to Top-Bottom"
     }
 }
 
@@ -665,7 +665,7 @@ class VRSplitCombineApp:
         frame_mode = ttk.LabelFrame(self.tab_combine, text=get_text('grp_combine_mode'), padding=10)
         frame_mode.pack(fill='x', pady=10)
         self.combine_mode_var = tk.StringVar(value="left_right")
-        ttk.Radiobutton(frame_mode, text=get_text('mode_lr'), variable=self.combine_mode_var, value="left_right").pack(anchor='w')
+        ttk.Radiobutton(frame_mode, text=get_text('mode_sbs'), variable=self.combine_mode_var, value="left_right").pack(anchor='w')
         ttk.Radiobutton(frame_mode, text=get_text('mode_ou'), variable=self.combine_mode_var, value="top_bottom").pack(anchor='w')
 
         frame_conv = ttk.LabelFrame(self.tab_combine, text=get_text('lbl_conversion'), padding=10)
@@ -771,14 +771,14 @@ class VRSplitCombineApp:
 
         frame_op = ttk.LabelFrame(self.tab_convert, text=get_text('grp_convert_op'), padding=10)
         frame_op.pack(fill='x', pady=5)
-        self.convert_op_var = tk.StringVar(value="custom_tb_to_lr")
+        self.convert_op_var = tk.StringVar(value="custom_tb_to_sbs")
         
         ops = [
-            (get_text('op_custom_tb_lr'), "custom_tb_to_lr"),
-            (get_text('op_lr_lr'), "lr_to_lr"),
+            (get_text('op_custom_tb_sbs'), "custom_tb_to_sbs"),
+            (get_text('op_sbs_sbs'), "sbs_to_sbs"),
             (get_text('op_tb_tb'), "tb_to_tb"),
-            (get_text('op_tb_lr'), "tb_to_lr"),
-            (get_text('op_lr_tb'), "lr_to_tb")
+            (get_text('op_tb_sbs'), "tb_to_sbs"),
+            (get_text('op_sbs_tb'), "sbs_to_tb")
         ]
         for text, val in ops:
             ttk.Radiobutton(frame_op, text=text, variable=self.convert_op_var, value=val).pack(anchor='w')
@@ -871,7 +871,7 @@ class VRSplitCombineApp:
                      filename = filename[:-len(s)]
                      break
              
-             suffix = "_lr" if mode == "left_right" else "_ou"
+             suffix = "_sbs" if mode == "left_right" else "_ou"
              ext_out = get_ext_from_codec(self.combine_codec_var.get(), ".mp4")
              out = os.path.join(dirname, f"{filename}{suffix}{ext_out}")
 
@@ -929,7 +929,7 @@ class VRSplitCombineApp:
         def task():
             if os.path.isdir(in_path):
                 output_dir = out_path if out_path and os.path.isdir(out_path) else None
-                batch_tb_to_lr(
+                batch_tb_to_sbs(
                     in_path,
                     output_dir=output_dir,
                     conversion=conversion,
@@ -949,13 +949,13 @@ class VRSplitCombineApp:
                      dirname = out_file if out_file else os.path.dirname(in_path)
                      filename = os.path.splitext(os.path.basename(in_path))[0]
                      suffix = ""
-                     if operation_mode in ("lr_to_tb", "tb_to_tb"):
+                     if operation_mode in ("sbs_to_tb", "tb_to_tb"):
                          suffix += "_tb"
                      else:
-                         suffix += "_lr"
+                         suffix += "_sbs"
 
                      if conversion == "to_fisheye":
-                         suffix = "_FE180" + suffix
+                         suffix = "_fisheye" + suffix
                      elif conversion == "to_hequirect":
                          suffix = "_hequirect" + suffix
                      elif conversion == "heq_to_flat" or conversion == "fish_to_flat":
@@ -964,7 +964,7 @@ class VRSplitCombineApp:
                      ext_out = get_ext_from_codec(self.convert_codec_var.get(), ".mp4")
                      out_file = os.path.join(dirname, f"{filename}{suffix}{ext_out}")
 
-                tb_to_lr(
+                tb_to_sbs(
                     in_path,
                     out_file,
                     conversion=conversion,
