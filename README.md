@@ -1,2 +1,11 @@
-requires python / tkinter
-If no fps, height or width are specified the videos fps height and width are used. These alter the video before all other things are applied.  CFR is enforced. Custom top bottom to sbs removes the black bars usually associated with older t/b videos leaving a perfect sbs conversion.
+<img width="1994" height="322" alt="Screenshot 2026-06-05 180304" src="https://github.com/user-attachments/assets/3af60bc2-5bac-4a36-ba1b-3be1b26dafa9" />
+
+<img width="300" height="400" alt="Screenshot 2026-06-05 175345" src="https://github.com/user-attachments/assets/c02f6dab-47a4-439f-ba3f-ce66c689bfff" />
+<img width="300" height="400" alt="Screenshot 2026-06-05 175332" src="https://github.com/user-attachments/assets/4ee10feb-48fc-40bb-8fbc-24901ca22a56" />
+<img width="300" height="400" alt="Screenshot 2026-06-05 175322" src="https://github.com/user-attachments/assets/3d1f6db4-302c-4696-abd0-0e620dfe726e" />
+
+
+
+
+
+
