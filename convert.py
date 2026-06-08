@@ -137,10 +137,13 @@ def split_video(input_path, mode, output_dir, conversion="none", log_callback=No
     fisheye_suffix = ""
     if conversion == "to_fisheye":
         v360_filter = f",v360=hequirect:fisheye{dim_str}"
-        fisheye_suffix = "_fisheye"
+        fisheye_suffix = "_FE180"
+    elif conversion == "to_fisheye190":
+        v360_filter = f",v360=hequirect:fisheye:d_fov=190{dim_str}"
+        fisheye_suffix = "_FE190"        
     elif conversion == "to_hequirect":
         v360_filter = f",v360=fisheye:hequirect{dim_str}"
-        fisheye_suffix = "_hequirect"
+        fisheye_suffix = "_180"
     elif conversion == "heq_to_flat":
         v360_filter = f",v360=hequirect:sg:v_fov=60:h_fov=60{dim_str}"
         fisheye_suffix = "_flat"
@@ -201,16 +204,16 @@ def split_video(input_path, mode, output_dir, conversion="none", log_callback=No
     else:
         if mode == 'left':
             crop_filter = f"fps={fps},setpts=N/({fps}*TB),crop=iw/2:ih:0:0{v360_filter},scale=w={width}:h={height}:flags=bicubic"
-            suffix = '_LT'
+            suffix = '_L'
         elif mode == 'right':
             crop_filter = f"fps={fps},setpts=N/({fps}*TB),crop=iw/2:ih:iw/2:0{v360_filter},scale=w={width}:h={height}:flags=bicubic"
-            suffix = '_RB' 
+            suffix = '_R' 
         elif mode == 'top':
             crop_filter = f"fps={fps},setpts=N/({fps}*TB),crop=iw/2:ih/2:iw/4:0{v360_filter},scale=w={width}:h={height}:flags=bicubic"
-            suffix = '_TL' 
+            suffix = '_T' 
         elif mode == 'bottom':
             crop_filter = f"fps={fps},setpts=N/({fps}*TB),crop=iw/2:ih/2:iw/4:ih/2{v360_filter},scale=w={width}:h={height}:flags=bicubic"
-            suffix = '_BR' 
+            suffix = '_B' 
         else:
             raise ValueError(f"Unknown split mode: {mode}")
         
@@ -262,6 +265,8 @@ def combine_video(input_path_1, input_path_2, mode, output_path, conversion="non
     v360_filter = ""
     if conversion == "to_fisheye":
         v360_filter = f"v360=hequirect:fisheye{dim_str},"
+    elif conversion == "to_fisheye190":
+        v360_filter = f"v360=hequirect:fisheye:d_fov=190{dim_str},"
     elif conversion == "to_hequirect":
         v360_filter = f"v360=fisheye:hequirect{dim_str},"
     elif conversion == "heq_to_flat":
@@ -337,6 +342,8 @@ def tb_to_sbs(input_path, output_path, conversion="none", log_callback=None, pro
     v360_filter = ""
     if conversion == "to_fisheye":
         v360_filter = f",v360=hequirect:fisheye{dim_str}"
+    elif conversion == "to_fisheye190":
+        v360_filter = f",v360=hequirect:fisheye:d_fov=190{dim_str}"
     elif conversion == "to_hequirect":
         v360_filter = f",v360=fisheye:hequirect{dim_str}"
     elif conversion == "heq_to_flat":
@@ -408,7 +415,7 @@ def batch_tb_to_sbs(input_dir, output_dir=None, conversion="none", log_callback=
         return False
         
     for input_path in mp4_files:
-        if "_sbs" in input_path or "_fisheye" in input_path or "_hequirect" in input_path or ".restored" in input_path:
+        if "_LR" in input_path or "_FE180" in input_path or "_FE190" in input_path or "_180" in input_path or ".restored" in input_path:
             continue
             
         filename = os.path.splitext(os.path.basename(input_path))[0]
@@ -416,14 +423,16 @@ def batch_tb_to_sbs(input_dir, output_dir=None, conversion="none", log_callback=
         
         suffix = ""
         if operation_mode in ("sbs_to_tb", "tb_to_tb"):
-            suffix += "_tb"
+            suffix += "_TB"
         else:
-            suffix += "_sbs"
+            suffix += "_LR"
             
         if conversion == "to_fisheye":
-            suffix = "_fisheye" + suffix
+            suffix = "_FE180" + suffix
+        elif conversion == "to_fisheye190":
+            suffix = "_FE190" + suffix
         elif conversion == "to_hequirect":
-            suffix = "_hequirect" + suffix
+            suffix = "_180" + suffix
         elif conversion == "heq_to_flat" or conversion == "fish_to_flat":
             suffix = "_flat" + suffix
             
@@ -488,6 +497,7 @@ TRANSLATIONS = {
         'lbl_conversion': "Projection Conversion:",
         'conv_none': "None (Keep Original)",
         'conv_to_fisheye': "To Fisheye (Hequirect -> Fisheye)",
+        'conv_to_fisheye190': "To Fisheye 190 (Hequirect -> Fisheye 190°)",
         'conv_to_hequirect': "To Hequirect (Fisheye -> Hequirect)",
         'conv_heq_to_flat': "To Flat (Hequirect -> Rectilinear Wide)",
         'conv_fish_to_flat': "To Flat (Fisheye -> Rectilinear Wide)",
@@ -594,6 +604,7 @@ class VRSplitCombineApp:
         self.split_conv_var = tk.StringVar(value="none")
         ttk.Radiobutton(frame_conv, text=get_text('conv_none'), variable=self.split_conv_var, value="none").pack(anchor='w')
         ttk.Radiobutton(frame_conv, text=get_text('conv_to_fisheye'), variable=self.split_conv_var, value="to_fisheye").pack(anchor='w')
+        ttk.Radiobutton(frame_conv, text=get_text('conv_to_fisheye190'), variable=self.split_conv_var, value="to_fisheye190").pack(anchor='w')
         ttk.Radiobutton(frame_conv, text=get_text('conv_to_hequirect'), variable=self.split_conv_var, value="to_hequirect").pack(anchor='w')
         ttk.Radiobutton(frame_conv, text=get_text('conv_heq_to_flat'), variable=self.split_conv_var, value="heq_to_flat").pack(anchor='w')
         ttk.Radiobutton(frame_conv, text=get_text('conv_fish_to_flat'), variable=self.split_conv_var, value="fish_to_flat").pack(anchor='w')
@@ -673,6 +684,7 @@ class VRSplitCombineApp:
         self.combine_conv_var = tk.StringVar(value="none")
         ttk.Radiobutton(frame_conv, text=get_text('conv_none'), variable=self.combine_conv_var, value="none").pack(anchor='w')
         ttk.Radiobutton(frame_conv, text=get_text('conv_to_fisheye'), variable=self.combine_conv_var, value="to_fisheye").pack(anchor='w')
+        ttk.Radiobutton(frame_conv, text=get_text('conv_to_fisheye190'), variable=self.combine_conv_var, value="to_fisheye190").pack(anchor='w')
         ttk.Radiobutton(frame_conv, text=get_text('conv_to_hequirect'), variable=self.combine_conv_var, value="to_hequirect").pack(anchor='w')
         ttk.Radiobutton(frame_conv, text=get_text('conv_heq_to_flat'), variable=self.combine_conv_var, value="heq_to_flat").pack(anchor='w')
         ttk.Radiobutton(frame_conv, text=get_text('conv_fish_to_flat'), variable=self.combine_conv_var, value="fish_to_flat").pack(anchor='w')
@@ -741,6 +753,7 @@ class VRSplitCombineApp:
         self.convert_conv_var = tk.StringVar(value="none")
         ttk.Radiobutton(frame_conv, text=get_text('conv_none'), variable=self.convert_conv_var, value="none").pack(anchor='w')
         ttk.Radiobutton(frame_conv, text=get_text('conv_to_fisheye'), variable=self.convert_conv_var, value="to_fisheye").pack(anchor='w')
+        ttk.Radiobutton(frame_conv, text=get_text('conv_to_fisheye190'), variable=self.convert_conv_var, value="to_fisheye190").pack(anchor='w')
         ttk.Radiobutton(frame_conv, text=get_text('conv_to_hequirect'), variable=self.convert_conv_var, value="to_hequirect").pack(anchor='w')
         ttk.Radiobutton(frame_conv, text=get_text('conv_heq_to_flat'), variable=self.convert_conv_var, value="heq_to_flat").pack(anchor='w')
         ttk.Radiobutton(frame_conv, text=get_text('conv_fish_to_flat'), variable=self.convert_conv_var, value="fish_to_flat").pack(anchor='w')
@@ -871,7 +884,7 @@ class VRSplitCombineApp:
                      filename = filename[:-len(s)]
                      break
              
-             suffix = "_sbs" if mode == "left_right" else "_ou"
+             suffix = "_LR" if mode == "left_right" else "_TB"
              ext_out = get_ext_from_codec(self.combine_codec_var.get(), ".mp4")
              out = os.path.join(dirname, f"{filename}{suffix}{ext_out}")
 
@@ -952,12 +965,14 @@ class VRSplitCombineApp:
                      if operation_mode in ("sbs_to_tb", "tb_to_tb"):
                          suffix += "_tb"
                      else:
-                         suffix += "_sbs"
+                         suffix += "_LR"
 
                      if conversion == "to_fisheye":
-                         suffix = "_fisheye" + suffix
+                         suffix = "_FE180" + suffix
+                     elif conversion == "to_fisheye190":
+                         suffix = "_FE190" + suffix
                      elif conversion == "to_hequirect":
-                         suffix = "_hequirect" + suffix
+                         suffix = "_180" + suffix
                      elif conversion == "heq_to_flat" or conversion == "fish_to_flat":
                          suffix = "_flat" + suffix
                          
