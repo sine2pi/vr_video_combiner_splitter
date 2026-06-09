@@ -129,9 +129,9 @@ def split_video(input_path, mode, output_dir, conversion="none", log_callback=No
 
     decoder_opts = []
     if codec == 'h264':
-        decoder_opts = ["-hwaccel", "cuda", "-c:v", "h264_cuvid"]
+        decoder_opts = ["-hwaccel", "auto"]
     elif codec == 'hevc':
-        decoder_opts = ["-hwaccel", "cuda", "-c:v", "hevc_cuvid"]
+        decoder_opts = ["-hwaccel", "auto"]
 
     v360_filter = ""
     fisheye_suffix = ""
@@ -163,12 +163,12 @@ def split_video(input_path, mode, output_dir, conversion="none", log_callback=No
         cmd.extend(["-i", input_path])
         cmd.extend(["-sws_flags", "bicubic+full_chroma_int+accurate_rnd+full_chroma_inp"])
         cmd.extend(["-filter_complex", filter_complex])
-        cmd.extend(["-map", "[left]", "-map", "0:a:?"])
+        cmd.extend(["-map", "[left]", "-map", "0:a?"])
         cmd.extend(get_codec_opts(out_codec, bitrate, include_audio=True))
         cmd.extend(["-movflags", "+faststart+write_colr+use_metadata_tags"])
         cmd.extend([output_left])
 
-        cmd.extend(["-map", "[right]", "-map", "0:a:?"])
+        cmd.extend(["-map", "[right]", "-map", "0:a?"])
         cmd.extend(get_codec_opts(out_codec, bitrate, include_audio=True))
         cmd.extend(["-movflags", "+faststart+write_colr+use_metadata_tags"])
         cmd.extend([output_right])
@@ -187,12 +187,12 @@ def split_video(input_path, mode, output_dir, conversion="none", log_callback=No
         cmd.extend(["-i", input_path])
         cmd.extend(["-sws_flags", "bicubic+full_chroma_int+accurate_rnd+full_chroma_inp"])
         cmd.extend(["-filter_complex", filter_complex])
-        cmd.extend(["-map", "[top]", "-map", "0:a:?"])
+        cmd.extend(["-map", "[top]", "-map", "0:a?"])
         
         cmd.extend(get_codec_opts(out_codec, bitrate, include_audio=True))
         cmd.extend(["-movflags", "+faststart+write_colr+use_metadata_tags"])
         cmd.extend([output_top])
-        cmd.extend(["-map", "[bottom]", "-map", "0:a:?"])
+        cmd.extend(["-map", "[bottom]", "-map", "0:a?"])
 
         cmd.extend(get_codec_opts(out_codec, bitrate, include_audio=True))
         cmd.extend(["-movflags", "+faststart+write_colr+use_metadata_tags"])
@@ -250,16 +250,20 @@ def combine_video(input_path_1, input_path_2, mode, output_path, conversion="non
     dim_str = f":w={w_in}:h={h_in}" if w_in > 0 and h_in > 0 else ""
 
     input_opts_1 = []
-    if codec1 == 'h264':
-        input_opts_1 = ["-hwaccel", "cuda", "-c:v", "h264_cuvid"]
-    elif codec1 == 'hevc':
-        input_opts_1 = ["-hwaccel", "cuda", "-c:v", "hevc_cuvid"]
+    if codec1 in ('h264', 'hevc'):
+        input_opts_1 = ["-hwaccel", "auto"]
+        
+    codec2 = vcodec(input_path_2)
+    input_opts_2 = []
+    if codec2 in ('h264', 'hevc'):
+        input_opts_2 = ["-hwaccel", "auto"]
     
     cmd = ["ffmpeg", "-hide_banner", "-y"]
     cmd.extend(input_opts_1)
     cmd.extend(["-i", input_path_1])
     if mask_path is not None:
         cmd.extend(["-i", mask_path])
+    cmd.extend(input_opts_2)
     cmd.extend(["-i", input_path_2])
 
     v360_filter = ""
@@ -292,7 +296,7 @@ def combine_video(input_path_1, input_path_2, mode, output_path, conversion="non
         filter_complex = f"{base_filter},fps={fps},setpts=N/({fps}*TB),scale=w={width}:h={height}:flags=bicubic[v]"
 
     cmd.extend(["-filter_complex", filter_complex])
-    cmd.extend(["-map", "[v]", "-map", "0:a:?"])
+    cmd.extend(["-map", "[v]", "-map", "0:a?"])
     cmd.extend(["-c:a", "copy"])
     
     cmd.extend(get_codec_opts(out_codec, bitrate, include_audio=False))
@@ -329,9 +333,9 @@ def tb_to_sbs(input_path, output_path, conversion="none", log_callback=None, pro
 
     decoder_opts = []
     if codec == 'h264':
-        decoder_opts = ["-hwaccel", "cuda", "-c:v", "h264_cuvid"]
+        decoder_opts = ["-hwaccel", "auto"]
     elif codec == 'hevc':
-        decoder_opts = ["-hwaccel", "cuda", "-c:v", "hevc_cuvid"]
+        decoder_opts = ["-hwaccel", "auto"]
         
     cmd = ["ffmpeg", "-hide_banner", "-y"]
     cmd.extend(decoder_opts)
