@@ -1,20 +1,6 @@
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import os, threading, subprocess, json
-import torch
-import torch.nn.functional as F
-import subprocess
-import numpy as np
-import warnings
-from tqdm import tqdm
-
-try:
-    from torchvision.models.optical_flow import raft_small, Raft_Small_Weights
-    HAS_RAFT = True
-except ImportError:
-    HAS_RAFT = False
-
-warnings.filterwarnings("ignore", category=UserWarning, module="torchvision")
 
 def have(a):
     return a is not None and str(a).strip() != ""
@@ -55,155 +41,6 @@ def vresolution(file_path):
         return int(parts[0]), int(parts[1])
     return 0, 0
 
-class RaftMotionCompensator:
-    def __init__(self, device=None, max_size=256, flow_scale=0.5, interp_mode="bicubic"):
-        self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.max_size = max_size
-        self.flow_scale = flow_scale
-        self.interp_mode = interp_mode
-        self.model = None
-        self.transforms = None
-
-    def _load_model(self):
-        if self.model is None:
-            if not HAS_RAFT:
-                raise ImportError("torchvision.models.optical_flow is required for RAFT.")
-            weights = Raft_Small_Weights.DEFAULT
-            self.transforms = weights.transforms()
-            self.model = raft_small(weights=weights, progress=False).to(self.device).eval()
-
-    def _compute_raft_flow(self, img1, img2):
-        orig_H, orig_W = img1.shape[2], img1.shape[3]
-        scale_factor = self.flow_scale
-        
-        current_H, current_W = orig_H * scale_factor, orig_W * scale_factor
-        if max(current_H, current_W) > self.max_size:
-            scale_factor = scale_factor * (self.max_size / float(max(current_H, current_W)))
-            
-        if scale_factor != 1.0:
-            new_H, new_W = int(orig_H * scale_factor), int(orig_W * scale_factor)
-            img1_s = F.interpolate(img1, size=(new_H, new_W), mode=self.interp_mode, antialias=True)
-            img2_s = F.interpolate(img2, size=(new_H, new_W), mode=self.interp_mode, antialias=True)
-        else:
-            img1_s, img2_s = img1, img2
-
-        img1_t, img2_t = self.transforms(img1_s, img2_s)
-        _, _, H_s, W_s = img1_t.shape
-        pad_h, pad_w = (8 - H_s % 8) % 8, (8 - W_s % 8) % 8
-        
-        if pad_h > 0 or pad_w > 0:
-            img1_t = F.pad(img1_t, (0, pad_w, 0, pad_h))
-            img2_t = F.pad(img2_t, (0, pad_w, 0, pad_h))
-        
-        with torch.autocast(device_type=self.device.type, dtype=torch.float16 if self.device.type == 'cuda' else torch.float32):
-            flow = self.model(img1_t, img2_t)[-1].float()
-            
-        flow = torch.nan_to_num(flow, nan=0.0, posinf=0.0, neginf=0.0)
-        
-        if pad_h > 0 or pad_w > 0:
-            flow = flow[:, :, :H_s, :W_s]
-            
-        if scale_factor != 1.0:
-            flow = F.interpolate(flow, size=(orig_H, orig_W), mode=self.interp_mode)
-            flow = flow / scale_factor
-
-        return flow
-
-    def _warp_frame(self, pt_frame, flow, t):
-        _, H, W = pt_frame.shape
-        flow_scaled = flow * t
-        
-        y, x = torch.meshgrid(torch.arange(H, device=self.device), torch.arange(W, device=self.device), indexing='ij')
-        x_norm = 2.0 * (x + flow_scaled[0]) / max(W - 1, 1) - 1.0
-        y_norm = 2.0 * (y + flow_scaled[1]) / max(H - 1, 1) - 1.0
-        
-        grid = torch.stack((x_norm, y_norm), dim=-1).unsqueeze(0)
-        return F.grid_sample(pt_frame.unsqueeze(0), grid, mode=self.interp_mode, padding_mode='border', align_corners=False).squeeze(0)
-
-    def _interpolate_frame(self, frame_a, frame_b, t, flow_fwd, flow_bwd):
-        warp_a = self._warp_frame(frame_a, flow_fwd, t)
-        warp_b = self._warp_frame(frame_b, flow_bwd, 1.0 - t)
-        
-        mag_fwd = torch.norm(flow_fwd, dim=0, keepdim=True)
-        mag_bwd = torch.norm(flow_bwd, dim=0, keepdim=True)
-        
-        weight_a = torch.exp(-mag_fwd * 0.1) * (1.0 - t)
-        weight_b = torch.exp(-mag_bwd * 0.1) * t
-        
-        Z = weight_a + weight_b
-        
-        mask = (Z > 1e-4).float()
-        norm_a = torch.where(mask > 0, weight_a / (Z + 1e-8), 1.0 - t)
-        norm_b = torch.where(mask > 0, weight_b / (Z + 1e-8), t)
-        
-        return torch.clamp(warp_a * norm_a + warp_b * norm_b, 0.0, 1.0)
-
-    def interpolate_video(self, input_video, output_video, src_fps, dst_fps, width, height, encoder_opts, read_cmd=None):
-        self._load_model()
-        
-        cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', input_video]
-        duration = float(subprocess.check_output(cmd).decode().strip())
-        num_src_frames = int(duration * src_fps)
-        num_dst_frames = int(duration * dst_fps)
-        
-        step = src_fps / dst_fps
-
-        if read_cmd is None:
-            read_cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", input_video, "-f", "image2pipe", "-pix_fmt", "rgb24", "-vcodec", "rawvideo", "-"]
-            
-        write_cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "rawvideo", "-vcodec", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{width}x{height}", "-r", str(dst_fps), "-i", "-"] + encoder_opts + [output_video]
-
-        print(f"[RAFT] Processing frames dynamically ({src_fps} -> {dst_fps} fps)...")
-        reader = subprocess.Popen(read_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=width*height*3*2)
-        writer = subprocess.Popen(write_cmd, stdin=subprocess.PIPE, bufsize=width*height*3*2)
-
-        def read_frame():
-            raw = reader.stdout.read(width * height * 3)
-            if not raw: return None
-            frame = np.frombuffer(raw, dtype=np.uint8).copy().reshape((height, width, 3))
-            return torch.from_numpy(frame).permute(2, 0, 1).float().div(255.0).to(self.device)
-
-        frame_a = read_frame()
-        if frame_a is None:
-            stderr_out = reader.stderr.read().decode('utf-8')
-            raise RuntimeError(f"Failed to read any frames from FFmpeg! Error:\n{stderr_out}")
-            
-        frame_b = read_frame()
-        current_idx = 0
-        out_idx = 0
-
-        with torch.no_grad():
-            with tqdm(total=num_dst_frames, unit="frame") as pbar:
-                while True:
-                    t_idx = out_idx * step
-                    
-                    while current_idx < int(t_idx) and frame_b is not None:
-                        frame_a = frame_b
-                        frame_b = read_frame()
-                        current_idx += 1
-
-                    if frame_b is None:
-                        if int(t_idx) > current_idx:
-                            break
-                        out_frame = frame_a
-                    else:
-                        t = float(t_idx - current_idx)
-                        if t <= 1e-6:
-                            out_frame = frame_a
-                        else:
-                            flow_fwd = self._compute_raft_flow(frame_a.unsqueeze(0), frame_b.unsqueeze(0)).squeeze(0)
-                            flow_bwd = self._compute_raft_flow(frame_b.unsqueeze(0), frame_a.unsqueeze(0)).squeeze(0)
-                            out_frame = self._interpolate_frame(frame_a, frame_b, t, flow_fwd, flow_bwd)
-
-                    writer.stdin.write((out_frame.cpu().permute(1,2,0).numpy() * 255).astype(np.uint8).tobytes())
-                    out_idx += 1
-                    pbar.update(1)
-
-        reader.stdout.close()
-        writer.stdin.close()
-        writer.wait()
-        reader.wait()
-        print("[RAFT] Interpolation complete!")
 
 def run_process(cmd, log_callback, process_callback=None):
     if log_callback:
@@ -266,16 +103,8 @@ def get_ext_from_codec(out_codec, original_ext):
         return "." + CODEC_OPTIONS_DICT[out_codec].get("ext", [original_ext.lstrip('.')])[0]
     return original_ext
 
-def split_video(input_path, mode, output_dir, conversion="none", log_callback=None, process_callback=None, bitrate="100M", fps=None, interpolate_method="ffmpeg", height=None, width=None, out_codec="h265-main10-win-nvidia"):
-    if interpolate_method in ["raft", "chronos"] and mode in ['left_and_right', 'top_and_bottom']:
-        if log_callback: log_callback(f"Running {interpolate_method} sequentially for both eyes...")
-        if mode == 'left_and_right':
-            split_video(input_path, 'left', output_dir, conversion, log_callback, process_callback, bitrate, fps, interpolate_method, height, width, out_codec)
-            split_video(input_path, 'right', output_dir, conversion, log_callback, process_callback, bitrate, fps, interpolate_method, height, width, out_codec)
-        else:
-            split_video(input_path, 'top', output_dir, conversion, log_callback, process_callback, bitrate, fps, interpolate_method, height, width, out_codec)
-            split_video(input_path, 'bottom', output_dir, conversion, log_callback, process_callback, bitrate, fps, interpolate_method, height, width, out_codec)
-        return True
+def split_video(input_path, mode, output_dir, conversion="none", log_callback=None, process_callback=None, bitrate="100M", fps=None, height=None, width=None, out_codec="h265-main10-win-nvidia", input_path2=None, pack_scale=0.40, padding=0):
+
 
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -297,6 +126,8 @@ def split_video(input_path, mode, output_dir, conversion="none", log_callback=No
     elif mode in ('top_and_bottom', 'top', 'bottom'):
         wi = w_in // 2 if w_in > 0 else 0
         hi = h_in // 2 if h_in > 0 else 0
+    elif mode == 'pack':
+        wi = w_in // 2 if w_in > 0 else 0
         
     dim_str = f":w={wi}:h={hi}" if wi > 0 and hi > 0 else ""
 
@@ -324,7 +155,75 @@ def split_video(input_path, mode, output_dir, conversion="none", log_callback=No
         v360_filter = f",v360=fisheye:sg:v_fov=60:h_fov=60{dim_str}"
         fisheye_suffix = "_flat"
     
-    if mode == 'left_and_right':
+    if mode == 'pack':
+        if not input_path2 or not os.path.exists(input_path2):
+            raise ValueError("mode='pack' requires a valid input_path2 (mask SBS video)")
+        
+        codec2 = vcodec(input_path2)
+        decoder_opts2 = []
+        if codec2 in ('h264', 'hevc'):
+            decoder_opts2 = ["-hwaccel", "auto"]
+        
+        eye_w = wi
+        eye_h = hi
+        sbs_w = eye_w * 2
+        
+        target_w = int(eye_w * pack_scale)
+        target_h = int(eye_h * pack_scale)
+        h_half = target_h // 2
+        w_half = target_w // 2
+        x_mid = sbs_w // 2 - target_w // 2
+        
+        ov_y_top = padding
+        ov_y_bot = eye_h - padding - h_half
+        ov_x_right = sbs_w - padding - w_half
+        ov_x_left = padding
+        
+        parts = []
+        parts.append(f"[0:v]fps={fps},setpts=N/({fps}*TB),split=2[b1][b2]")
+        parts.append(f"[b1]crop=iw/2:ih:0:0{v360_filter}[bl]")
+        parts.append(f"[b2]crop=iw/2:ih:iw/2:0{v360_filter}[br]")
+        parts.append(f"[bl][br]hstack[base]")
+        
+        parts.append(f"[1:v]fps={fps},setpts=N/({fps}*TB),split=2[m1][m2]")
+        parts.append(f"[m1]crop=iw/2:ih:0:0{v360_filter},scale={target_w}:{target_h}:flags=bicubic,split=2[ml1][ml2]")
+        parts.append(f"[m2]crop=iw/2:ih:iw/2:0{v360_filter},scale={target_w}:{target_h}:flags=bicubic,split=4[mr1][mr2][mr3][mr4]")
+        
+        parts.append(f"[ml1]crop={target_w}:{h_half}:0:{h_half}[ml_bottom]")
+        parts.append(f"[ml2]crop={target_w}:{h_half}:0:0[ml_top]")
+        
+        parts.append(f"[mr1]crop={w_half}:{h_half}:0:0[mr_tl]")
+        parts.append(f"[mr2]crop={w_half}:{h_half}:{w_half}:0[mr_tr]")
+        parts.append(f"[mr3]crop={w_half}:{h_half}:0:{h_half}[mr_bl]")
+        parts.append(f"[mr4]crop={w_half}:{h_half}:{w_half}:{h_half}[mr_br]")
+        
+        parts.append(f"[base][ml_bottom]overlay={x_mid}:{ov_y_top}[o1]")
+        parts.append(f"[o1][ml_top]overlay={x_mid}:{ov_y_bot}[o2]")
+        parts.append(f"[o2][mr_bl]overlay={ov_x_right}:{ov_y_top}[o3]")
+        parts.append(f"[o3][mr_br]overlay={ov_x_left}:{ov_y_top}[o4]")
+        parts.append(f"[o4][mr_tl]overlay={ov_x_right}:{ov_y_bot}[o5]")
+        parts.append(f"[o5][mr_tr]overlay={ov_x_left}:{ov_y_bot},scale=w={width}:h={height}:flags=bicubic[packed]")
+        
+        filter_complex = ";".join(parts)
+        
+        output_file = os.path.join(output_dir, f"{filename}_ALPHA{fisheye_suffix}{ext}")
+        
+        cmd = ["ffmpeg", "-hide_banner", "-y"]
+        cmd.extend(decoder_opts)
+        cmd.extend(["-i", input_path])
+        cmd.extend(decoder_opts2)
+        cmd.extend(["-i", input_path2])
+        cmd.extend(["-sws_flags", "bicubic+full_chroma_int+accurate_rnd+full_chroma_inp"])
+        cmd.extend(["-filter_complex", filter_complex])
+        cmd.extend(["-map", "[packed]", "-map", "0:a?"])
+        cmd.extend(get_codec_opts(out_codec, bitrate, include_audio=True))
+        cmd.extend(["-movflags", "+faststart+write_colr+use_metadata_tags"])
+        cmd.extend([output_file])
+        
+        if log_callback: log_callback(f"Starting pack (conv={conversion}, scale={pack_scale}, padding={padding}) for {input_path}...")
+        run_process(cmd, log_callback, process_callback)
+
+    elif mode == 'left_and_right':
 
         output_left = os.path.join(output_dir, f"{filename}_L{fisheye_suffix}{ext}")
         output_right = os.path.join(output_dir, f"{filename}_R{fisheye_suffix}{ext}")
@@ -402,39 +301,13 @@ def split_video(input_path, mode, output_dir, conversion="none", log_callback=No
             if mode in ('left', 'right'): h_target = h_in
             elif mode in ('top', 'bottom'): h_target = h_in // 2
 
-        if interpolate_method == "raft":
-            src_fps = frame_rate(input_path)
-            filter_complex = f"[0:v]{crop_filter},fps={src_fps},setpts=N/({src_fps}*TB),scale=w={w_target}:h={h_target}:flags=bicubic[v]"
-            if log_callback: log_callback(f"Starting PyTorch RAFT split ({mode}, conv={conversion}) for {input_path}...")
-            
-            src_fps = frame_rate(input_path)
-            dst_fps = float(fps) if have(fps) else src_fps
-            encoder_opts = get_codec_opts(out_codec, bitrate, include_audio=False)
-            
-            read_cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error"]
-            read_cmd.extend(decoder_opts)
-            read_cmd.extend(["-i", input_path])
-            read_cmd.extend(["-filter_complex", filter_complex, "-map", "[v]"])
-            read_cmd.extend(["-f", "image2pipe", "-pix_fmt", "rgb24", "-vcodec", "rawvideo", "-"])
-            
-            comp = RaftMotionCompensator()
-            comp.interpolate_video(input_path, output_file, src_fps, dst_fps, w_target, h_target, encoder_opts, read_cmd=read_cmd)
-            return True
-
         fps_filter = f"fps={fps}"
         audio_map = ["-c:a", "copy"]
         fps_opts = []
         ffmpeg_bin = "ffmpeg"
 
         if have(fps):
-            if interpolate_method == "chronos":
-                ffmpeg_bin = r"C:\Program Files\Topaz Labs LLC\Topaz Video\ffmpeg.exe"
-                fps_filter = f"tvai_fi=model=chf-3:slowmo=1:rdt=-0.000001:fps={fps}:device=-2:vram=1:instances=1"
-                audio_map = ["-filter:a", "asetpts=N/SR/TB,aresample=async=1:min_comp=0.001:min_hard_comp=0.1:first_pts=0", "-c:a", "aac"]
-                fps_opts = ["-fps_mode", "cfr", "-r", str(fps)]
-                filter_complex = f"[0:v]{crop_filter},scale=w={width}:h={height}:flags=bicubic,{fps_filter}[v]"
-            else:
-                filter_complex = f"[0:v]{crop_filter},{fps_filter},setpts=N/({fps}*TB),scale=w={width}:h={height}:flags=bicubic[v]"
+            filter_complex = f"[0:v]{crop_filter},{fps_filter},setpts=N/({fps}*TB),scale=w={width}:h={height}:flags=bicubic[v]"
         else:
             filter_complex = f"[0:v]{crop_filter},scale=w={width}:h={height}:flags=bicubic[v]"
         
@@ -454,7 +327,7 @@ def split_video(input_path, mode, output_dir, conversion="none", log_callback=No
 
     return True
     
-def combine_video(input_path_1, input_path_2, mode, output_path, conversion="none", log_callback=None, process_callback=None, bitrate="100M", mask_path=None, fps=None, interpolate_method="ffmpeg", height=None, width=None, out_codec="h265-main10-win-nvidia"):
+def combine_video(input_path_1, input_path_2, mode, output_path, conversion="none", log_callback=None, process_callback=None, bitrate="100M", mask_path=None, fps=None, height=None, width=None, out_codec="h265-main10-win-nvidia"):
 
     if log_callback: log_callback(f"Combining {input_path_1} and {input_path_2} into {output_path} (Mode: {mode}, Conv: {conversion})")
 
@@ -511,56 +384,16 @@ def combine_video(input_path_1, input_path_2, mode, output_path, conversion="non
     else:
         raise ValueError(f"Unknown combine mode: {mode}")
 
-    if interpolate_method == "raft":
-        src_fps = frame_rate(input_path_1)
-        out_w = int(width) if have(width) and width != 'iw' else (w_in * 2 if mode == "left_right" else w_in)
-        out_h = int(height) if have(height) and height != 'ih' else (h_in * 2 if mode == "top_bottom" else h_in)
-        
-        if mask_path is not None:
-            filter_complex = f"{base_filter}[stacked];[1:v][stacked]scale2ref[mask][stacked_ref];[stacked_ref][mask]overlay=0:0,fps={src_fps},setpts=N/({src_fps}*TB),scale=w={out_w}:h={out_h}:flags=bicubic[v]"
-        else:
-            filter_complex = f"{base_filter},fps={src_fps},setpts=N/({src_fps}*TB),scale=w={out_w}:h={out_h}:flags=bicubic[v]"
-
-        if log_callback: log_callback(f"Running PyTorch RAFT combination for {input_path_1} and {input_path_2}...")
-        
-        src_fps = frame_rate(input_path_1)
-        dst_fps = float(fps) if have(fps) else src_fps
-        encoder_opts = get_codec_opts(out_codec, bitrate, include_audio=False)
-        
-        read_cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error"]
-        read_cmd.extend(input_opts_1)
-        read_cmd.extend(["-i", input_path_1])
-        if mask_path is not None:
-            read_cmd.extend(["-i", mask_path])
-        read_cmd.extend(input_opts_2)
-        read_cmd.extend(["-i", input_path_2])
-        read_cmd.extend(["-filter_complex", filter_complex, "-map", "[v]"])
-        read_cmd.extend(["-f", "image2pipe", "-pix_fmt", "rgb24", "-vcodec", "rawvideo", "-"])
-        
-        comp = RaftMotionCompensator()
-        comp.interpolate_video(input_path_1, output_path, src_fps, dst_fps, out_w, out_h, encoder_opts, read_cmd=read_cmd)
-        return True
-
     fps_filter = f"fps={fps}"
     audio_map = ["-c:a", "copy"]
     fps_opts = []
     ffmpeg_bin = "ffmpeg"
 
     if have(fps):
-        if interpolate_method == "chronos":
-            ffmpeg_bin = r"C:\Program Files\Topaz Labs LLC\Topaz Video\ffmpeg.exe"
-            fps_filter = f"tvai_fi=model=chf-3:slowmo=1:rdt=-0.000001:fps={fps}:device=-2:vram=1:instances=1"
-            audio_map = ["-filter:a", "asetpts=N/SR/TB,aresample=async=1:min_comp=0.001:min_hard_comp=0.1:first_pts=0", "-c:a", "aac"]
-            fps_opts = ["-fps_mode", "cfr", "-r", str(fps)]
-            if mask_path is not None:
-                filter_complex = f"{base_filter}[stacked];[1:v][stacked]scale2ref[mask][stacked_ref];[stacked_ref][mask]overlay=0:0,scale=w={width}:h={height}:flags=bicubic,{fps_filter}[v]"
-            else:
-                filter_complex = f"{base_filter},scale=w={width}:h={height}:flags=bicubic,{fps_filter}[v]"
+        if mask_path is not None:
+            filter_complex = f"{base_filter}[stacked];[1:v][stacked]scale2ref[mask][stacked_ref];[stacked_ref][mask]overlay=0:0,{fps_filter},setpts=N/({fps}*TB),scale=w={width}:h={height}:flags=bicubic[v]"
         else:
-            if mask_path is not None:
-                filter_complex = f"{base_filter}[stacked];[1:v][stacked]scale2ref[mask][stacked_ref];[stacked_ref][mask]overlay=0:0,{fps_filter},setpts=N/({fps}*TB),scale=w={width}:h={height}:flags=bicubic[v]"
-            else:
-                filter_complex = f"{base_filter},{fps_filter},setpts=N/({fps}*TB),scale=w={width}:h={height}:flags=bicubic[v]"
+            filter_complex = f"{base_filter},{fps_filter},setpts=N/({fps}*TB),scale=w={width}:h={height}:flags=bicubic[v]"
     else:
         if mask_path is not None:
             filter_complex = f"{base_filter}[stacked];[1:v][stacked]scale2ref[mask][stacked_ref];[stacked_ref][mask]overlay=0:0,scale=w={width}:h={height}:flags=bicubic[v]"
@@ -589,7 +422,7 @@ def combine_video(input_path_1, input_path_2, mode, output_path, conversion="non
     run_process(cmd, log_callback, process_callback)
     return True
 
-def tb_to_sbs(input_path, output_path, conversion="none", log_callback=None, process_callback=None, bitrate="100M", operation_mode="custom_tb_to_sbs", mask_path=None, fps=None, interpolate_method="ffmpeg", height=None, width=None, out_codec="h265-main10-win-nvidia"):
+def tb_to_sbs(input_path, output_path, conversion="none", log_callback=None, process_callback=None, bitrate="100M", operation_mode="custom_tb_to_sbs", mask_path=None, fps=None, height=None, width=None, out_codec="h265-main10-win-nvidia"):
     if log_callback: log_callback(f"Converting video for {input_path} (conv={conversion}, op={operation_mode})")
     
     fps = frame_rate(input_path) if not have(fps) else fps
@@ -618,7 +451,7 @@ def tb_to_sbs(input_path, output_path, conversion="none", log_callback=None, pro
     elif codec == 'hevc':
         decoder_opts = ["-hwaccel", "auto"]
         
-    ffmpeg_bin = r"C:\Program Files\Topaz Labs LLC\Topaz Video\ffmpeg.exe" if interpolate_method == "chronos" else "ffmpeg"
+    ffmpeg_bin = "ffmpeg"
     cmd = [ffmpeg_bin, "-hide_banner", "-y"]
     cmd.extend(decoder_opts)
     cmd.extend(["-i", input_path])
@@ -669,50 +502,12 @@ def tb_to_sbs(input_path, output_path, conversion="none", log_callback=None, pro
             f"[left][right]hstack=inputs=2"
         )
 
-    if interpolate_method == "raft":
-        w_target = int(width) if have(width) and width != 'iw' else w_in
-        if not have(width) or width == 'iw':
-            if operation_mode == "tb_to_sbs": w_target = w_in * 2
-            elif operation_mode == "sbs_to_tb": w_target = w_in // 2
-
-        h_target = int(height) if have(height) and height != 'ih' else h_in
-        if not have(height) or height == 'ih':
-            if operation_mode == "tb_to_sbs": h_target = h_in // 2
-            elif operation_mode == "sbs_to_tb": h_target = h_in * 2
-            elif operation_mode == "custom_tb_to_sbs": h_target = h_in // 2
-
-        src_fps = frame_rate(input_path)
-        if mask_path is not None:
-            filter_complex = f"{base_filter}[stacked];[1:v][stacked]scale2ref[mask][stacked_ref];[stacked_ref][mask]overlay=0:0,fps={src_fps},setpts=N/({src_fps}*TB),scale=w={w_target}:h={h_target}:flags=bicubic[v]"
-        else:
-            filter_complex = f"{base_filter},fps={src_fps},setpts=N/({src_fps}*TB),scale=w={w_target}:h={h_target}:flags=bicubic[v]"
-
-        if log_callback: log_callback(f"Running PyTorch RAFT interpolation with VR filters on {input_path}...")
-        
-        dst_fps = float(fps) if have(fps) else src_fps
-        encoder_opts = get_codec_opts(out_codec, bitrate, include_audio=False)
-        
-        read_cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error"]
-        read_cmd.extend(decoder_opts)
-        read_cmd.extend(["-i", input_path])
-        if mask_path is not None:
-            read_cmd.extend(["-i", mask_path])
-        read_cmd.extend(["-filter_complex", filter_complex, "-map", "[v]"])
-        read_cmd.extend(["-f", "image2pipe", "-pix_fmt", "rgb24", "-vcodec", "rawvideo", "-"])
-        
-        comp = RaftMotionCompensator()
-        comp.interpolate_video(input_path, output_path, src_fps, dst_fps, w_target, h_target, encoder_opts, read_cmd=read_cmd)
-        return True
-
     fps_filter = f"fps={fps}"
     audio_map = ["-map", "0:a?", "-c:a", "copy"]
     fps_opts = []
     
     if have(fps):
-        if interpolate_method == "chronos":
-            fps_filter = f"tvai_fi=model=chf-3:slowmo=1:rdt=-0.000001:fps={fps}:device=-2:vram=1:instances=1"
-            audio_map = ["-map", "0:a?", "-filter:a", "asetpts=N/SR/TB,aresample=async=1:min_comp=0.001:min_hard_comp=0.1:first_pts=0", "-c:a", "aac"]
-            fps_opts = ["-fps_mode", "cfr", "-r", str(fps)]
+        fps_opts = ["-fps_mode", "cfr", "-r", str(fps)]
 
     if mask_path is not None:
         filter_complex = f"{base_filter}[stacked];[1:v][stacked]scale2ref[mask][stacked_ref];[stacked_ref][mask]overlay=0:0,{fps_filter},setpts=N/({fps}*TB),scale=w={width}:h={height}:flags=bicubic[v]"
@@ -734,7 +529,7 @@ def tb_to_sbs(input_path, output_path, conversion="none", log_callback=None, pro
     run_process(cmd, log_callback, process_callback)
     return True
 
-def batch_tb_to_sbs(input_dir, output_dir=None, conversion="none", log_callback=None, process_callback=None, bitrate="100M", operation_mode="custom_tb_to_sbs", mask_path=None, fps=None, interpolate_method="ffmpeg", height=None, width=None, out_codec="h265-main10-win-nvidia"):
+def batch_tb_to_sbs(input_dir, output_dir=None, conversion="none", log_callback=None, process_callback=None, bitrate="100M", operation_mode="custom_tb_to_sbs", mask_path=None, fps=None, height=None, width=None, out_codec="h265-main10-win-nvidia"):
 
     width = 'iw' if not have(width) else width
     height = 'ih' if not have(height) else height  
@@ -776,7 +571,7 @@ def batch_tb_to_sbs(input_dir, output_dir=None, conversion="none", log_callback=
             if log_callback: log_callback(f"Skipping {os.path.basename(input_path)}, output {os.path.basename(output_path)} already exists.")
             continue
             
-        tb_to_sbs(input_path, output_path, conversion=conversion, log_callback=log_callback, process_callback=process_callback, bitrate=bitrate, operation_mode=operation_mode, mask_path=mask_path, fps=fps, interpolate_method=interpolate_method, height=height, width=width, out_codec=out_codec)
+        tb_to_sbs(input_path, output_path, conversion=conversion, log_callback=log_callback, process_callback=process_callback, bitrate=bitrate, operation_mode=operation_mode, mask_path=mask_path, fps=fps, height=height, width=width, out_codec=out_codec)
         
     if log_callback: log_callback("Batch conversion finished.")
     return True
@@ -802,6 +597,10 @@ TRANSLATIONS = {
         'mode_top': "Top Eye",
         'mode_bottom': "Bottom Eye",
         'mode_tb_sep': "Top & Bottom (Separate Files)",
+        'mode_pack': "Pack (Overlay Masks)",
+        'lbl_mask_video': "Mask Video (for Pack):",
+        'lbl_pack_scale': "Pack Scale:",
+        'lbl_padding': "Padding:",
         'btn_start': "Start Processing",
         'btn_stop': "Stop",
         'msg_stop': "Process stopped.",
@@ -908,6 +707,13 @@ class VRSplitCombineApp:
         ttk.Entry(frame_input, textvariable=self.split_input_var).pack(side='left', fill='x', expand=True, padx=5)
         ttk.Button(frame_input, text=get_text('btn_browse'), command=lambda: self.browse_file(self.split_input_var)).pack(side='left')
 
+        frame_mask = ttk.Frame(self.tab_split)
+        frame_mask.pack(fill='x', pady=5)
+        ttk.Label(frame_mask, text=get_text('lbl_mask_video')).pack(side='left')
+        self.split_mask_var = tk.StringVar()
+        ttk.Entry(frame_mask, textvariable=self.split_mask_var).pack(side='left', fill='x', expand=True, padx=5)
+        ttk.Button(frame_mask, text=get_text('btn_browse'), command=lambda: self.browse_file(self.split_mask_var)).pack(side='left')
+
         frame_output = ttk.Frame(self.tab_split)
         frame_output.pack(fill='x', pady=5)
         ttk.Label(frame_output, text=get_text('lbl_output_dir')).pack(side='left')
@@ -927,6 +733,7 @@ class VRSplitCombineApp:
             (get_text('mode_top'), "top"),
             (get_text('mode_bottom'), "bottom"),
             (get_text('mode_tb_sep'), "top_and_bottom"),
+            (get_text('mode_pack'), "pack"),
         ]
         
         for text, val in modes:
@@ -958,10 +765,6 @@ class VRSplitCombineApp:
         self.split_fps_var = tk.StringVar()
         ttk.Entry(frame_params, textvariable=self.split_fps_var, width=8).pack(side='left', padx=5)
         
-        ttk.Label(frame_params, text="Interpolation:").pack(side='left')
-        self.split_interp_var = tk.StringVar(value="ffmpeg")
-        ttk.OptionMenu(frame_params, self.split_interp_var, "ffmpeg", "ffmpeg", "chronos", "raft").pack(side='left', padx=5)
-        
         ttk.Label(frame_params, text="Width (Optional):").pack(side='left')
         self.split_width_var = tk.StringVar()
         ttk.Entry(frame_params, textvariable=self.split_width_var, width=8).pack(side='left', padx=5)
@@ -969,6 +772,15 @@ class VRSplitCombineApp:
         ttk.Label(frame_params, text="Height (Optional):").pack(side='left')
         self.split_height_var = tk.StringVar()
         ttk.Entry(frame_params, textvariable=self.split_height_var, width=8).pack(side='left', padx=5)
+
+        frame_pack_params = ttk.Frame(self.tab_split)
+        frame_pack_params.pack(fill='x', pady=5)
+        ttk.Label(frame_pack_params, text=get_text('lbl_pack_scale')).pack(side='left')
+        self.split_pack_scale_var = tk.StringVar(value="0.40")
+        ttk.Entry(frame_pack_params, textvariable=self.split_pack_scale_var, width=8).pack(side='left', padx=5)
+        ttk.Label(frame_pack_params, text=get_text('lbl_padding')).pack(side='left')
+        self.split_padding_var = tk.StringVar(value="0")
+        ttk.Entry(frame_pack_params, textvariable=self.split_padding_var, width=8).pack(side='left', padx=5)
 
         btn_frame = ttk.Frame(self.tab_split)
         btn_frame.pack(pady=10)
@@ -1042,10 +854,6 @@ class VRSplitCombineApp:
         self.combine_fps_var = tk.StringVar()
         ttk.Entry(frame_params, textvariable=self.combine_fps_var, width=8).pack(side='left', padx=5)
         
-        ttk.Label(frame_params, text="Interpolation:").pack(side='left')
-        self.combine_interp_var = tk.StringVar(value="ffmpeg")
-        ttk.OptionMenu(frame_params, self.combine_interp_var, "ffmpeg", "ffmpeg", "chronos", "raft").pack(side='left', padx=5)
-        
         ttk.Label(frame_params, text="Width (Optional):").pack(side='left')
         self.combine_width_var = tk.StringVar()
         ttk.Entry(frame_params, textvariable=self.combine_width_var, width=8).pack(side='left', padx=5)
@@ -1115,10 +923,6 @@ class VRSplitCombineApp:
         self.convert_fps_var = tk.StringVar()
         ttk.Entry(frame_params, textvariable=self.convert_fps_var, width=8).pack(side='left', padx=5)
         
-        ttk.Label(frame_params, text="Interpolation:").pack(side='left')
-        self.convert_interp_var = tk.StringVar(value="ffmpeg")
-        ttk.OptionMenu(frame_params, self.convert_interp_var, "ffmpeg", "ffmpeg", "chronos", "raft").pack(side='left', padx=5)
-        
         ttk.Label(frame_params, text="Width (Optional):").pack(side='left')
         self.convert_width_var = tk.StringVar()
         ttk.Entry(frame_params, textvariable=self.convert_width_var, width=8).pack(side='left', padx=5)
@@ -1181,6 +985,9 @@ class VRSplitCombineApp:
         self.btn_split_stop.config(state='normal')
         
         def task():
+            mask_val = self.split_mask_var.get()
+            pack_scale_val = float(self.split_pack_scale_var.get()) if self.split_pack_scale_var.get() else 0.40
+            padding_val = int(self.split_padding_var.get()) if self.split_padding_var.get() else 0
             split_video(
                 input_path, 
                 mode, 
@@ -1190,10 +997,12 @@ class VRSplitCombineApp:
                 process_callback=lambda p: setattr(self, 'proc_split', p),
                 bitrate=self.split_bitrate_var.get(),
                 fps=self.split_fps_var.get(),
-                interpolate_method=self.split_interp_var.get(),
                 width=self.split_width_var.get(),
                 height=self.split_height_var.get(),
-                out_codec=self.split_codec_var.get()
+                out_codec=self.split_codec_var.get(),
+                input_path2=mask_val if mask_val and os.path.exists(mask_val) else None,
+                pack_scale=pack_scale_val,
+                padding=padding_val
             )
             self.log(get_text('msg_task_complete'))
             messagebox.showinfo(get_text('title_success'), get_text('msg_success_split'))
@@ -1251,7 +1060,6 @@ class VRSplitCombineApp:
                 bitrate=self.combine_bitrate_var.get(),
                 mask_path=mask_val if mask_val and os.path.exists(mask_val) else None,
                 fps=self.combine_fps_var.get(),
-                interpolate_method=self.combine_interp_var.get(),
                 width=self.combine_width_var.get(),
                 height=self.combine_height_var.get(),
                 out_codec=self.combine_codec_var.get()
@@ -1299,7 +1107,6 @@ class VRSplitCombineApp:
                     operation_mode=operation_mode,
                     mask_path=mask_val if mask_val and os.path.exists(mask_val) else None,
                     fps=self.convert_fps_var.get(),
-                    interpolate_method=self.convert_interp_var.get(),
                     width=self.convert_width_var.get(),
                     height=self.convert_height_var.get(),
                     out_codec=self.convert_codec_var.get()
@@ -1337,7 +1144,6 @@ class VRSplitCombineApp:
                     operation_mode=operation_mode,
                     mask_path=mask_val if mask_val and os.path.exists(mask_val) else None,
                     fps=self.convert_fps_var.get(),
-                    interpolate_method=self.convert_interp_var.get(),
                     width=self.convert_width_var.get(),
                     height=self.convert_height_var.get(),
                     out_codec=self.convert_codec_var.get()
