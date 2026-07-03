@@ -11,35 +11,73 @@ def aorb(a, b):
 def aborc(a, b, c):
     return aorb(a, b) if not have(c) else c
 
+def get_video_info(file_path):
+    """
+    Consolidated metadata retrieval to reduce ffprobe process spawning.
+    Returns a dictionary with width, height, codec, fps, and bitrate.
+    """
+    cmd = [
+        'ffprobe', '-v', 'error',
+        '-select_streams', 'v:0',
+        '-show_entries', 'stream=width,height,codec_name,r_frame_rate:format=bit_rate',
+        '-of', 'json', file_path
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        data = json.loads(result.stdout)
+    except Exception as e:
+        print(f"Error running ffprobe: {e}")
+        return {
+            'width': 0, 'height': 0, 'codec': '', 'fps': 30.0, 'bitrate': None
+        }
+
+    info = {
+        'width': 0,
+        'height': 0,
+        'codec': '',
+        'fps': 30.0,
+        'bitrate': None
+    }
+
+    if 'streams' in data and len(data['streams']) > 0:
+        stream = data['streams'][0]
+        info['width'] = int(stream.get('width', 0))
+        info['height'] = int(stream.get('height', 0))
+        info['codec'] = stream.get('codec_name', '')
+
+        fps_str = stream.get('r_frame_rate', '30/1')
+        if '/' in fps_str:
+            try:
+                num, denom = map(int, fps_str.split('/'))
+                info['fps'] = num / denom if denom != 0 else 30.0
+            except (ValueError, ZeroDivisionError):
+                info['fps'] = 30.0
+        else:
+            try:
+                info['fps'] = float(fps_str)
+            except ValueError:
+                info['fps'] = 30.0
+
+    if 'format' in data:
+        info['bitrate'] = data['format'].get('bit_rate')
+
+    return info
+
 def bitrate(input_file):
-    cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', input_file]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    data = json.loads(result.stdout)
-    bitrate = data.get('format', {}).get('bit_rate')
-    return None
+    info = get_video_info(input_file)
+    return info['bitrate']
 
 def frame_rate(file_path):
-    cmd = ['ffprobe','-v', 'error','-select_streams', 'v:0','-show_entries', 'stream=width,height,duration,r_frame_rate,nb_frames','-of', 'json', file_path]
-    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-    info = json.loads(result.stdout)
-    stream = info['streams'][0]
-    fps_str = stream.get('r_frame_rate', '30/1')
-    num, denom = map(int, fps_str.split('/'))
-    fps = num / denom if denom != 0 else 30.0
-    return fps
+    info = get_video_info(file_path)
+    return info['fps']
 
 def vcodec(file_path):
-    cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name", "-of", "csv=p=0", file_path]
-    codec = subprocess.check_output(cmd).decode(errors='ignore').strip()
-    return codec
+    info = get_video_info(file_path)
+    return info['codec']
 
 def vresolution(file_path):
-    cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", file_path]
-    res = subprocess.check_output(cmd).decode(errors='ignore').strip()
-    parts = res.split('x')
-    if len(parts) == 2:
-        return int(parts[0]), int(parts[1])
-    return 0, 0
+    info = get_video_info(file_path)
+    return info['width'], info['height']
 
 
 def run_process(cmd, log_callback, process_callback=None):
@@ -47,10 +85,10 @@ def run_process(cmd, log_callback, process_callback=None):
         log_callback(f"Executing: {' '.join(cmd)}")
     else:
         print(f"Executing: {' '.join(cmd)}")
-        
+
     process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True, errors='replace')
     if process_callback: process_callback(process)
-    
+
     for line in process.stdout:
         if log_callback: log_callback(line.strip())
     process.wait()
@@ -79,22 +117,22 @@ if DEFAULT_CODEC not in CODEC_OPTIONS:
 
 def get_codec_opts(out_codec, bitrate, include_audio=False):
     opts = ["-fps_mode", "cfr"]
-    
+
     if out_codec in CODEC_OPTIONS_DICT:
         enc = CODEC_OPTIONS_DICT[out_codec]
         ffmpeg_opts = enc.get('ffmpegOpts', '')
         if ffmpeg_opts:
             opts.extend(ffmpeg_opts.split())
-        
+
         if 'bitrateOpts' in enc and 'cbr' in enc['bitrateOpts']:
             cbr_opts = enc['bitrateOpts']['cbr'].replace("<CONST_BITRATE_VALUE>", bitrate)
             opts.extend(cbr_opts.split())
     else:
         opts.extend(["-c:v", "hevc_nvenc", "-profile:v", "main10", "-pix_fmt", "p010le", "-b_ref_mode", "disabled", "-tag:v", "hvc1", "-g", "20", "-rc", "cbr", "-b:v", bitrate, "-maxrate", bitrate, "-bufsize", bitrate])
-        
+
     if include_audio:
         opts.extend(["-c:a", "aac", "-b:a", "256k"])
-        
+
     opts.extend(["-avoid_negative_ts", "make_zero", "-fflags", "+genpts"])
     return opts
 
@@ -109,16 +147,18 @@ def split_video(input_path, mode, output_dir, conversion="none", log_callback=No
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
-    fps = frame_rate(input_path) if not have(fps) else fps
+    if log_callback: log_callback(f"Detecting metadata for {input_path}...")
+    info = get_video_info(input_path)
+    fps = info['fps'] if not have(fps) else fps
+    codec = info['codec']
+    w_in, h_in = info['width'], info['height']
+
     filename = os.path.splitext(os.path.basename(input_path))[0]
     ext = os.path.splitext(input_path)[1]
     ext = get_ext_from_codec(out_codec, ext)
     width = 'iw' if not have(width) else width
-    height = 'ih' if not have(height) else height    
-    
-    if log_callback: log_callback(f"Detecting codec for {input_path}...")
-    codec = vcodec(input_path)
-    w_in, h_in = vresolution(input_path)
+    height = 'ih' if not have(height) else height
+
     wi, hi = w_in, h_in
 
     if mode in ('left_and_right', 'left', 'right'):
@@ -128,7 +168,7 @@ def split_video(input_path, mode, output_dir, conversion="none", log_callback=No
         hi = h_in // 2 if h_in > 0 else 0
     elif mode == 'pack':
         wi = w_in // 2 if w_in > 0 else 0
-        
+
     dim_str = f":w={wi}:h={hi}" if wi > 0 and hi > 0 else ""
 
     decoder_opts = []
@@ -144,7 +184,7 @@ def split_video(input_path, mode, output_dir, conversion="none", log_callback=No
         fisheye_suffix = "_FE180"
     elif conversion == "to_fisheye190":
         v360_filter = f",v360=hequirect:fisheye:d_fov=190{dim_str}"
-        fisheye_suffix = "_FE190"        
+        fisheye_suffix = "_FE190"
     elif conversion == "to_hequirect":
         v360_filter = f",v360=fisheye:hequirect{dim_str}"
         fisheye_suffix = "_180"
@@ -154,60 +194,60 @@ def split_video(input_path, mode, output_dir, conversion="none", log_callback=No
     elif conversion == "fish_to_flat":
         v360_filter = f",v360=fisheye:sg:v_fov=60:h_fov=60{dim_str}"
         fisheye_suffix = "_flat"
-    
+
     if mode == 'pack':
         if not input_path2 or not os.path.exists(input_path2):
             raise ValueError("mode='pack' requires a valid input_path2 (mask SBS video)")
-        
+
         codec2 = vcodec(input_path2)
         decoder_opts2 = []
         if codec2 in ('h264', 'hevc'):
             decoder_opts2 = ["-hwaccel", "auto"]
-        
+
         eye_w = wi
         eye_h = hi
         sbs_w = eye_w * 2
-        
+
         target_w = int(eye_w * pack_scale)
         target_h = int(eye_h * pack_scale)
         h_half = target_h // 2
         w_half = target_w // 2
         x_mid = sbs_w // 2 - target_w // 2
-        
+
         ov_y_top = padding
         ov_y_bot = eye_h - padding - h_half
         ov_x_right = sbs_w - padding - w_half
         ov_x_left = padding
-        
+
         parts = []
         parts.append(f"[0:v]fps={fps},setpts=N/({fps}*TB),split=2[b1][b2]")
         parts.append(f"[b1]crop=iw/2:ih:0:0{v360_filter}[bl]")
         parts.append(f"[b2]crop=iw/2:ih:iw/2:0{v360_filter}[br]")
         parts.append(f"[bl][br]hstack[base]")
-        
+
         parts.append(f"[1:v]fps={fps},setpts=N/({fps}*TB),split=2[m1][m2]")
         parts.append(f"[m1]crop=iw/2:ih:0:0{v360_filter},scale={target_w}:{target_h}:flags=bicubic,split=2[ml1][ml2]")
         parts.append(f"[m2]crop=iw/2:ih:iw/2:0{v360_filter},scale={target_w}:{target_h}:flags=bicubic,split=4[mr1][mr2][mr3][mr4]")
-        
+
         parts.append(f"[ml1]crop={target_w}:{h_half}:0:{h_half}[ml_bottom]")
         parts.append(f"[ml2]crop={target_w}:{h_half}:0:0[ml_top]")
-        
+
         parts.append(f"[mr1]crop={w_half}:{h_half}:0:0[mr_tl]")
         parts.append(f"[mr2]crop={w_half}:{h_half}:{w_half}:0[mr_tr]")
         parts.append(f"[mr3]crop={w_half}:{h_half}:0:{h_half}[mr_bl]")
         parts.append(f"[mr4]crop={w_half}:{h_half}:{w_half}:{h_half}[mr_br]")
-        
+
         parts.append(f"[base][ml_bottom]overlay={x_mid}:{ov_y_top}[o1]")
         parts.append(f"[o1][ml_top]overlay={x_mid}:{ov_y_bot}[o2]")
         parts.append(f"[o2][mr_bl]overlay={ov_x_right}:{ov_y_top}[o3]")
         parts.append(f"[o3][mr_br]overlay={ov_x_left}:{ov_y_top}[o4]")
         parts.append(f"[o4][mr_tl]overlay={ov_x_right}:{ov_y_bot}[o5]")
         parts.append(f"[o5][mr_tr]overlay={ov_x_left}:{ov_y_bot},scale=w={width}:h={height}:flags=bicubic[packed]")
-        
+
         filter_complex = ";".join(parts)
-        
+
         output_file = os.path.join(output_dir, f"{filename}_ALPHA{fisheye_suffix}{ext}")
-        
+
         cmd = ["ffmpeg", "-hide_banner", "-y"]
         cmd.extend(decoder_opts)
         cmd.extend(["-i", input_path])
@@ -219,7 +259,7 @@ def split_video(input_path, mode, output_dir, conversion="none", log_callback=No
         cmd.extend(get_codec_opts(out_codec, bitrate, include_audio=True))
         cmd.extend(["-movflags", "+faststart+write_colr+use_metadata_tags"])
         cmd.extend([output_file])
-        
+
         if log_callback: log_callback(f"Starting pack (conv={conversion}, scale={pack_scale}, padding={padding}) for {input_path}...")
         run_process(cmd, log_callback, process_callback)
 
@@ -229,7 +269,7 @@ def split_video(input_path, mode, output_dir, conversion="none", log_callback=No
         output_right = os.path.join(output_dir, f"{filename}_R{fisheye_suffix}{ext}")
 
         filter_complex = f"[0:v]fps={fps},setpts=N/({fps}*TB),split=2[v1][v2];[v1]crop=iw/2:iw/2:0:(ih-iw/2)/2{v360_filter},scale=w={width}:h={height}:flags=bicubic[left];[v2]crop=iw/2:iw/2:iw/2:(ih-iw/2)/2{v360_filter},scale=w={width}:h={height}:flags=bicubic[right]"
-        
+
         cmd = ["ffmpeg", "-hide_banner", "-y"]
         cmd.extend(decoder_opts)
         cmd.extend(["-i", input_path])
@@ -244,23 +284,23 @@ def split_video(input_path, mode, output_dir, conversion="none", log_callback=No
         cmd.extend(get_codec_opts(out_codec, bitrate, include_audio=True))
         cmd.extend(["-movflags", "+faststart+write_colr+use_metadata_tags"])
         cmd.extend([output_right])
-        
+
         if log_callback: log_callback(f"Starting split (left_and_right, conv={conversion}) for {input_path}...")
         run_process(cmd, log_callback, process_callback)
-        
+
     elif mode == 'top_and_bottom':
         output_top = os.path.join(output_dir, f"{filename}_T{fisheye_suffix}{ext}")
         output_bottom = os.path.join(output_dir, f"{filename}_B{fisheye_suffix}{ext}")
 
         filter_complex = f"[0:v]fps={fps},setpts=N/({fps}*TB),split=2[v1][v2];[v1]crop=ih/2:ih/2:(iw-ih/2)/2:0{v360_filter},scale=w={width}:h={height}:flags=bicubic[top];[v2]crop=ih/2:ih/2:(iw-ih/2)/2:ih/2{v360_filter},scale=w={width}:h={height}:flags=bicubic[bottom]"
-        
+
         cmd = ["ffmpeg", "-hide_banner", "-y"]
         cmd.extend(decoder_opts)
         cmd.extend(["-i", input_path])
         cmd.extend(["-sws_flags", "bicubic+full_chroma_int+accurate_rnd+full_chroma_inp"])
         cmd.extend(["-filter_complex", filter_complex])
         cmd.extend(["-map", "[top]", "-map", "0:a?"])
-        
+
         cmd.extend(get_codec_opts(out_codec, bitrate, include_audio=True))
         cmd.extend(["-movflags", "+faststart+write_colr+use_metadata_tags"])
         cmd.extend([output_top])
@@ -269,28 +309,28 @@ def split_video(input_path, mode, output_dir, conversion="none", log_callback=No
         cmd.extend(get_codec_opts(out_codec, bitrate, include_audio=True))
         cmd.extend(["-movflags", "+faststart+write_colr+use_metadata_tags"])
         cmd.extend([output_bottom])
-        
+
         if log_callback: log_callback(f"Starting split (top_and_bottom, conv={conversion}) for {input_path}...")
         run_process(cmd, log_callback, process_callback)
-        
+
     else:
         if mode == 'left':
             crop_filter = f"crop=iw/2:ih:0:0{v360_filter}"
             suffix = '_L'
         elif mode == 'right':
             crop_filter = f"crop=iw/2:ih:iw/2:0{v360_filter}"
-            suffix = '_R' 
+            suffix = '_R'
         elif mode == 'top':
             crop_filter = f"crop=iw/2:ih/2:iw/4:0{v360_filter}"
-            suffix = '_T' 
+            suffix = '_T'
         elif mode == 'bottom':
             crop_filter = f"crop=ih/2:ih/2:(iw-ih/2)/2:ih/2{v360_filter}"
-            suffix = '_B' 
+            suffix = '_B'
         else:
             raise ValueError(f"Unknown split mode: {mode}")
-        
+
         output_file = os.path.join(output_dir, f"{filename}{suffix}{fisheye_suffix}{ext}")
-        
+
         w_target = int(width) if have(width) and width != 'iw' else w_in
         if not have(width) or width == 'iw':
             if mode in ('left', 'right', 'top'): w_target = w_in // 2
@@ -310,7 +350,7 @@ def split_video(input_path, mode, output_dir, conversion="none", log_callback=No
             filter_complex = f"[0:v]{crop_filter},{fps_filter},setpts=N/({fps}*TB),scale=w={width}:h={height}:flags=bicubic[v]"
         else:
             filter_complex = f"[0:v]{crop_filter},scale=w={width}:h={height}:flags=bicubic[v]"
-        
+
         cmd = [ffmpeg_bin, "-hide_banner", "-y"]
         cmd.extend(decoder_opts)
         cmd.extend(["-i", input_path])
@@ -326,32 +366,34 @@ def split_video(input_path, mode, output_dir, conversion="none", log_callback=No
         run_process(cmd, log_callback, process_callback)
 
     return True
-    
+
 def combine_video(input_path_1, input_path_2, mode, output_path, conversion="none", log_callback=None, process_callback=None, bitrate="100M", mask_path=None, fps=None, height=None, width=None, out_codec="h265-main10-win-nvidia"):
 
     if log_callback: log_callback(f"Combining {input_path_1} and {input_path_2} into {output_path} (Mode: {mode}, Conv: {conversion})")
 
-    fps = frame_rate(input_path_1) if not have(fps) else fps
-    codec1 = vcodec(input_path_1)
-    w_in, h_in = vresolution(input_path_1)
-    
+    if log_callback: log_callback(f"Detecting metadata for {input_path_1}...")
+    info1 = get_video_info(input_path_1)
+    fps = info1['fps'] if not have(fps) else fps
+    codec1 = info1['codec']
+    w_in, h_in = info1['width'], info1['height']
+
     out_w = w_in * 2 if mode == "left_right" else w_in
     out_h = h_in * 2 if mode == "top_bottom" else h_in
 
     width = 'iw' if not have(width) else width
-    height = 'ih' if not have(height) else height  
-    
+    height = 'ih' if not have(height) else height
+
     dim_str = f":w={w_in}:h={h_in}" if w_in > 0 and h_in > 0 else ""
 
     input_opts_1 = []
     if codec1 in ('h264', 'hevc'):
         input_opts_1 = ["-hwaccel", "auto"]
-        
+
     codec2 = vcodec(input_path_2)
     input_opts_2 = []
     if codec2 in ('h264', 'hevc'):
         input_opts_2 = ["-hwaccel", "auto"]
-    
+
     cmd = ["ffmpeg", "-hide_banner", "-y"]
     cmd.extend(input_opts_1)
     cmd.extend(["-i", input_path_1])
@@ -399,7 +441,7 @@ def combine_video(input_path_1, input_path_2, mode, output_path, conversion="non
             filter_complex = f"{base_filter}[stacked];[1:v][stacked]scale2ref[mask][stacked_ref];[stacked_ref][mask]overlay=0:0,scale=w={width}:h={height}:flags=bicubic[v]"
         else:
             filter_complex = f"{base_filter},scale=w={width}:h={height}:flags=bicubic[v]"
-            
+
     cmd = [ffmpeg_bin, "-hide_banner", "-y"]
     cmd.extend(input_opts_1)
     cmd.extend(["-i", input_path_1])
@@ -412,11 +454,11 @@ def combine_video(input_path_1, input_path_2, mode, output_path, conversion="non
     cmd.extend(["-map", "[v]", "-map", "0:a?"])
     cmd.extend(audio_map)
     cmd.extend(fps_opts)
-    
+
     cmd.extend(get_codec_opts(out_codec, bitrate, include_audio=False))
     cmd.extend(["-movflags", "+faststart"])
     cmd.extend(["-color_range", "pc", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"])
-    
+
     cmd.extend([output_path])
 
     run_process(cmd, log_callback, process_callback)
@@ -424,10 +466,12 @@ def combine_video(input_path_1, input_path_2, mode, output_path, conversion="non
 
 def tb_to_sbs(input_path, output_path, conversion="none", log_callback=None, process_callback=None, bitrate="100M", operation_mode="custom_tb_to_sbs", mask_path=None, fps=None, height=None, width=None, out_codec="h265-main10-win-nvidia"):
     if log_callback: log_callback(f"Converting video for {input_path} (conv={conversion}, op={operation_mode})")
-    
-    fps = frame_rate(input_path) if not have(fps) else fps
-    codec = vcodec(input_path)
-    w_in, h_in = vresolution(input_path)
+
+    if log_callback: log_callback(f"Detecting metadata for {input_path}...")
+    info = get_video_info(input_path)
+    fps = info['fps'] if not have(fps) else fps
+    codec = info['codec']
+    w_in, h_in = info['width'], info['height']
     wi, hi = w_in, h_in
     if operation_mode == "sbs_to_sbs":
         wi = w_in // 2 if w_in > 0 else 0
@@ -439,9 +483,9 @@ def tb_to_sbs(input_path, output_path, conversion="none", log_callback=None, pro
     else: # custom_tb_to_sbs
         wi = w_in // 2 if w_in > 0 else 0
         hi = h_in // 2 if h_in > 0 else 0
-        
+
     width = 'iw' if not have(width) else width
-    height = 'ih' if not have(height) else height  
+    height = 'ih' if not have(height) else height
 
     dim_str = f":w={wi}:h={hi}" if wi > 0 and hi > 0 else ""
 
@@ -450,14 +494,14 @@ def tb_to_sbs(input_path, output_path, conversion="none", log_callback=None, pro
         decoder_opts = ["-hwaccel", "auto"]
     elif codec == 'hevc':
         decoder_opts = ["-hwaccel", "auto"]
-        
+
     ffmpeg_bin = "ffmpeg"
     cmd = [ffmpeg_bin, "-hide_banner", "-y"]
     cmd.extend(decoder_opts)
     cmd.extend(["-i", input_path])
     if mask_path is not None:
         cmd.extend(["-i", mask_path])
-    
+
     v360_filter = ""
     if conversion == "to_fisheye":
         v360_filter = f",v360=hequirect:fisheye{dim_str}"
@@ -469,7 +513,7 @@ def tb_to_sbs(input_path, output_path, conversion="none", log_callback=None, pro
         v360_filter = f",v360=hequirect:sg:v_fov=60:h_fov=60{dim_str}"
     elif conversion == "fish_to_flat":
         v360_filter = f",v360=fisheye:sg:v_fov=60:h_fov=60{dim_str}"
-        
+
     base_filter = ""
     if operation_mode == "sbs_to_sbs":
         base_filter = (
@@ -505,7 +549,7 @@ def tb_to_sbs(input_path, output_path, conversion="none", log_callback=None, pro
     fps_filter = f"fps={fps}"
     audio_map = ["-map", "0:a?", "-c:a", "copy"]
     fps_opts = []
-    
+
     if have(fps):
         fps_opts = ["-fps_mode", "cfr", "-r", str(fps)]
 
@@ -513,17 +557,17 @@ def tb_to_sbs(input_path, output_path, conversion="none", log_callback=None, pro
         filter_complex = f"{base_filter}[stacked];[1:v][stacked]scale2ref[mask][stacked_ref];[stacked_ref][mask]overlay=0:0,{fps_filter},setpts=N/({fps}*TB),scale=w={width}:h={height}:flags=bicubic[v]"
     else:
         filter_complex = f"{base_filter},{fps_filter},setpts=N/({fps}*TB),scale=w={width}:h={height}:flags=bicubic[v]"
-    
+
     cmd.extend(["-filter_complex", filter_complex])
     cmd.extend(["-map", "[v]"])
     cmd.extend(audio_map)
     cmd.extend(fps_opts)
-    
+
     cmd.extend(get_codec_opts(out_codec, bitrate, include_audio=False))
     cmd.extend(["-movflags", "+faststart"])
 
     cmd.extend(["-color_range", "pc", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"])
-    
+
     cmd.extend([output_path])
 
     run_process(cmd, log_callback, process_callback)
@@ -532,29 +576,29 @@ def tb_to_sbs(input_path, output_path, conversion="none", log_callback=None, pro
 def batch_tb_to_sbs(input_dir, output_dir=None, conversion="none", log_callback=None, process_callback=None, bitrate="100M", operation_mode="custom_tb_to_sbs", mask_path=None, fps=None, height=None, width=None, out_codec="h265-main10-win-nvidia"):
 
     width = 'iw' if not have(width) else width
-    height = 'ih' if not have(height) else height  
-    
+    height = 'ih' if not have(height) else height
+
     import glob
     if log_callback: log_callback(f"Starting batch conversion in {input_dir}")
     mp4_files = glob.glob(os.path.join(input_dir, "*.mp4")) + glob.glob(os.path.join(input_dir, "*.mkv"))
-    
+
     if not mp4_files:
         if log_callback: log_callback(f"No .mp4 or .mkv files found in {input_dir}")
         return False
-        
+
     for input_path in mp4_files:
         if "_LR" in input_path or "_FE180" in input_path or "_FE190" in input_path or "_180" in input_path or ".restored" in input_path:
             continue
-            
+
         filename = os.path.splitext(os.path.basename(input_path))[0]
         out_dir = output_dir if output_dir else input_dir
-        
+
         suffix = ""
         if operation_mode in ("sbs_to_tb", "tb_to_tb"):
             suffix += "_TB"
         else:
             suffix += "_LR"
-            
+
         if conversion == "to_fisheye":
             suffix = "_FE180" + suffix
         elif conversion == "to_fisheye190":
@@ -563,16 +607,16 @@ def batch_tb_to_sbs(input_dir, output_dir=None, conversion="none", log_callback=
             suffix = "_180" + suffix
         elif conversion == "heq_to_flat" or conversion == "fish_to_flat":
             suffix = "_flat" + suffix
-            
+
         ext_out = get_ext_from_codec(out_codec, ".mp4")
         output_path = os.path.join(out_dir, f"{filename}{suffix}{ext_out}")
-        
+
         if os.path.exists(output_path):
             if log_callback: log_callback(f"Skipping {os.path.basename(input_path)}, output {os.path.basename(output_path)} already exists.")
             continue
-            
+
         tb_to_sbs(input_path, output_path, conversion=conversion, log_callback=log_callback, process_callback=process_callback, bitrate=bitrate, operation_mode=operation_mode, mask_path=mask_path, fps=fps, height=height, width=width, out_codec=out_codec)
-        
+
     if log_callback: log_callback("Batch conversion finished.")
     return True
 
@@ -586,7 +630,7 @@ TRANSLATIONS = {
         'tab_convert': " VR Convert ",
         'log_title': "Log",
         'btn_back': "Back to Main Menu",
-        
+
         'lbl_input_video': "Input Video:",
         'lbl_output_dir': "Output Dir (Optional):",
         'btn_browse': "Browse...",
@@ -604,7 +648,7 @@ TRANSLATIONS = {
         'btn_start': "Start Processing",
         'btn_stop': "Stop",
         'msg_stop': "Process stopped.",
-        
+
         'lbl_input_1': "Input File 1 (Left/Top):",
         'lbl_input_2': "Input File 2 (Right/Bottom):",
         'lbl_mask_image': "Mask Image (Optional):",
@@ -613,7 +657,7 @@ TRANSLATIONS = {
         'grp_combine_mode': "Combine Mode",
         'mode_sbs': "Side-by-Side (Left-Right)",
         'mode_ou': "Over-Under (Top-Bottom)",
-        
+
         'msg_error_input_file': "Please select a valid input file.",
         'msg_error_input_1': "Please select Input File 1.",
         'msg_error_input_2': "Please select Input File 2.",
@@ -651,15 +695,15 @@ class VRSplitCombineApp:
         self.root = root
         self.on_return = on_return
         self.root.title(get_text('title'))
-        
+
         self.main_frame = ttk.Frame(root, padding="10")
         self.main_frame.pack(fill='both', expand=True)
 
         header_frame = ttk.Frame(self.main_frame)
         header_frame.pack(fill='x', pady=(0, 10))
-        
+
         ttk.Label(header_frame, text=get_text('title'), font=('Arial', 14, 'bold')).pack(side='left')
-        
+
         if self.on_return:
             ttk.Button(header_frame, text=get_text('btn_back'), command=self.go_back).pack(side='right')
 
@@ -723,9 +767,9 @@ class VRSplitCombineApp:
 
         frame_mode = ttk.LabelFrame(self.tab_split, text=get_text('grp_split_mode'), padding=10)
         frame_mode.pack(fill='x', pady=10)
-        
+
         self.split_mode_var = tk.StringVar(value="left_and_right")
-        
+
         modes = [
             (get_text('mode_left'), "left"),
             (get_text('mode_right'), "right"),
@@ -735,7 +779,7 @@ class VRSplitCombineApp:
             (get_text('mode_tb_sep'), "top_and_bottom"),
             (get_text('mode_pack'), "pack"),
         ]
-        
+
         for text, val in modes:
             ttk.Radiobutton(frame_mode, text=text, variable=self.split_mode_var, value=val).pack(anchor='w')
 
@@ -754,7 +798,7 @@ class VRSplitCombineApp:
         ttk.Label(frame_bitrate, text=get_text('lbl_bitrate')).pack(side='left')
         self.split_bitrate_var = tk.StringVar(value="100M")
         ttk.Entry(frame_bitrate, textvariable=self.split_bitrate_var, width=10).pack(side='left', padx=5)
-        
+
         ttk.Label(frame_bitrate, text="Output Codec:").pack(side='left', padx=(10, 0))
         self.split_codec_var = tk.StringVar(value=DEFAULT_CODEC)
         ttk.OptionMenu(frame_bitrate, self.split_codec_var, DEFAULT_CODEC, *CODEC_OPTIONS).pack(side='left', padx=5)
@@ -764,11 +808,11 @@ class VRSplitCombineApp:
         ttk.Label(frame_params, text="FPS (Optional):").pack(side='left')
         self.split_fps_var = tk.StringVar()
         ttk.Entry(frame_params, textvariable=self.split_fps_var, width=8).pack(side='left', padx=5)
-        
+
         ttk.Label(frame_params, text="Width (Optional):").pack(side='left')
         self.split_width_var = tk.StringVar()
         ttk.Entry(frame_params, textvariable=self.split_width_var, width=8).pack(side='left', padx=5)
-        
+
         ttk.Label(frame_params, text="Height (Optional):").pack(side='left')
         self.split_height_var = tk.StringVar()
         ttk.Entry(frame_params, textvariable=self.split_height_var, width=8).pack(side='left', padx=5)
@@ -784,13 +828,13 @@ class VRSplitCombineApp:
 
         btn_frame = ttk.Frame(self.tab_split)
         btn_frame.pack(pady=10)
-        
+
         self.btn_split_start = ttk.Button(btn_frame, text=get_text('btn_start'), command=self.run_split)
         self.btn_split_start.pack(side='left', padx=5)
-        
+
         self.btn_split_stop = ttk.Button(btn_frame, text=get_text('btn_stop'), command=self.stop_split, state='disabled')
         self.btn_split_stop.pack(side='left', padx=5)
-        
+
         self.proc_split = None
 
     def setup_combine_tab(self):
@@ -843,7 +887,7 @@ class VRSplitCombineApp:
         ttk.Label(frame_bitrate, text=get_text('lbl_bitrate')).pack(side='left')
         self.combine_bitrate_var = tk.StringVar(value="100M")
         ttk.Entry(frame_bitrate, textvariable=self.combine_bitrate_var, width=10).pack(side='left', padx=5)
-        
+
         ttk.Label(frame_bitrate, text="Output Codec:").pack(side='left', padx=(10, 0))
         self.combine_codec_var = tk.StringVar(value=DEFAULT_CODEC)
         ttk.OptionMenu(frame_bitrate, self.combine_codec_var, DEFAULT_CODEC, *CODEC_OPTIONS).pack(side='left', padx=5)
@@ -853,24 +897,24 @@ class VRSplitCombineApp:
         ttk.Label(frame_params, text="FPS (Optional):").pack(side='left')
         self.combine_fps_var = tk.StringVar()
         ttk.Entry(frame_params, textvariable=self.combine_fps_var, width=8).pack(side='left', padx=5)
-        
+
         ttk.Label(frame_params, text="Width (Optional):").pack(side='left')
         self.combine_width_var = tk.StringVar()
         ttk.Entry(frame_params, textvariable=self.combine_width_var, width=8).pack(side='left', padx=5)
-        
+
         ttk.Label(frame_params, text="Height (Optional):").pack(side='left')
         self.combine_height_var = tk.StringVar()
         ttk.Entry(frame_params, textvariable=self.combine_height_var, width=8).pack(side='left', padx=5)
 
         btn_frame = ttk.Frame(self.tab_combine)
         btn_frame.pack(pady=10)
-        
+
         self.btn_combine_start = ttk.Button(btn_frame, text=get_text('btn_start'), command=self.run_combine)
         self.btn_combine_start.pack(side='left', padx=5)
-        
+
         self.btn_combine_stop = ttk.Button(btn_frame, text=get_text('btn_stop'), command=self.stop_combine, state='disabled')
         self.btn_combine_stop.pack(side='left', padx=5)
-        
+
         self.proc_combine = None
 
     def setup_convert_tab(self):
@@ -912,7 +956,7 @@ class VRSplitCombineApp:
         ttk.Label(frame_bitrate, text=get_text('lbl_bitrate')).pack(side='left')
         self.convert_bitrate_var = tk.StringVar(value="100M")
         ttk.Entry(frame_bitrate, textvariable=self.convert_bitrate_var, width=10).pack(side='left', padx=5)
-        
+
         ttk.Label(frame_bitrate, text="Output Codec:").pack(side='left', padx=(10, 0))
         self.convert_codec_var = tk.StringVar(value=DEFAULT_CODEC)
         ttk.OptionMenu(frame_bitrate, self.convert_codec_var, DEFAULT_CODEC, *CODEC_OPTIONS).pack(side='left', padx=5)
@@ -922,11 +966,11 @@ class VRSplitCombineApp:
         ttk.Label(frame_params, text="FPS (Optional):").pack(side='left')
         self.convert_fps_var = tk.StringVar()
         ttk.Entry(frame_params, textvariable=self.convert_fps_var, width=8).pack(side='left', padx=5)
-        
+
         ttk.Label(frame_params, text="Width (Optional):").pack(side='left')
         self.convert_width_var = tk.StringVar()
         ttk.Entry(frame_params, textvariable=self.convert_width_var, width=8).pack(side='left', padx=5)
-        
+
         ttk.Label(frame_params, text="Height (Optional):").pack(side='left')
         self.convert_height_var = tk.StringVar()
         ttk.Entry(frame_params, textvariable=self.convert_height_var, width=8).pack(side='left', padx=5)
@@ -934,7 +978,7 @@ class VRSplitCombineApp:
         frame_op = ttk.LabelFrame(self.tab_convert, text=get_text('grp_convert_op'), padding=10)
         frame_op.pack(fill='x', pady=5)
         self.convert_op_var = tk.StringVar(value="custom_tb_to_sbs")
-        
+
         ops = [
             (get_text('op_custom_tb_sbs'), "custom_tb_to_sbs"),
             (get_text('op_sbs_sbs'), "sbs_to_sbs"),
@@ -947,13 +991,13 @@ class VRSplitCombineApp:
 
         btn_frame = ttk.Frame(self.tab_convert)
         btn_frame.pack(pady=10)
-        
+
         self.btn_convert_start = ttk.Button(btn_frame, text=get_text('btn_start'), command=self.run_convert)
         self.btn_convert_start.pack(side='left', padx=5)
-        
+
         self.btn_convert_stop = ttk.Button(btn_frame, text=get_text('btn_stop'), command=self.stop_convert, state='disabled')
         self.btn_convert_stop.pack(side='left', padx=5)
-        
+
         self.proc_convert = None
 
     def browse_file(self, var):
@@ -980,17 +1024,17 @@ class VRSplitCombineApp:
             output_dir = os.path.dirname(input_path)
 
         self.log(get_text('msg_starting_split').format(mode))
-        
+
         self.btn_split_start.config(state='disabled')
         self.btn_split_stop.config(state='normal')
-        
+
         def task():
             mask_val = self.split_mask_var.get()
             pack_scale_val = float(self.split_pack_scale_var.get()) if self.split_pack_scale_var.get() else 0.40
             padding_val = int(self.split_padding_var.get()) if self.split_padding_var.get() else 0
             split_video(
-                input_path, 
-                mode, 
+                input_path,
+                mode,
                 output_dir,
                 conversion=self.split_conv_var.get(),
                 log_callback=self.log,
@@ -1038,7 +1082,7 @@ class VRSplitCombineApp:
                  if filename.endswith(s):
                      filename = filename[:-len(s)]
                      break
-             
+
              suffix = "_LR" if mode == "left_right" else "_TB"
              ext_out = get_ext_from_codec(self.combine_codec_var.get(), ".mp4")
              out = os.path.join(dirname, f"{filename}{suffix}{ext_out}")
@@ -1050,9 +1094,9 @@ class VRSplitCombineApp:
 
         def task():
             combine_video(
-                in1, 
-                in2, 
-                mode, 
+                in1,
+                in2,
+                mode,
                 out,
                 conversion=self.combine_conv_var.get(),
                 log_callback=self.log,
@@ -1088,7 +1132,7 @@ class VRSplitCombineApp:
         if not in_path or not os.path.exists(in_path):
             messagebox.showerror(get_text('title_error'), get_text('msg_error_input_file'))
             return
-            
+
         self.log(f"Starting Conversion for: {in_path}")
 
         self.btn_convert_start.config(state='disabled')
@@ -1130,7 +1174,7 @@ class VRSplitCombineApp:
                          suffix = "_180" + suffix
                      elif conversion == "heq_to_flat" or conversion == "fish_to_flat":
                          suffix = "_flat" + suffix
-                         
+
                      ext_out = get_ext_from_codec(self.convert_codec_var.get(), ".mp4")
                      out_file = os.path.join(dirname, f"{filename}{suffix}{ext_out}")
 
@@ -1166,4 +1210,3 @@ if __name__ == "__main__":
     root = tk.Tk()
     app = VRSplitCombineApp(root)
     root.mainloop()
-
