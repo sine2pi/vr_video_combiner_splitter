@@ -11,35 +11,40 @@ def aorb(a, b):
 def aborc(a, b, c):
     return aorb(a, b) if not have(c) else c
 
-def bitrate(input_file):
-    cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', input_file]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    data = json.loads(result.stdout)
-    bitrate = data.get('format', {}).get('bit_rate')
-    return None
 
-def frame_rate(file_path):
-    cmd = ['ffprobe','-v', 'error','-select_streams', 'v:0','-show_entries', 'stream=width,height,duration,r_frame_rate,nb_frames','-of', 'json', file_path]
-    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-    info = json.loads(result.stdout)
-    stream = info['streams'][0]
-    fps_str = stream.get('r_frame_rate', '30/1')
-    num, denom = map(int, fps_str.split('/'))
-    fps = num / denom if denom != 0 else 30.0
-    return fps
+def get_video_info(file_path):
+    """
+    Consolidates video metadata retrieval into a single ffprobe call.
+    Returns a dictionary with width, height, codec, and fps.
+    """
+    cmd = [
+        'ffprobe', '-v', 'error', '-select_streams', 'v:0',
+        '-show_entries', 'stream=width,height,codec_name,r_frame_rate',
+        '-of', 'json', file_path
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        info = json.loads(result.stdout)
+        if not info.get('streams'):
+            return None
+        stream = info['streams'][0]
 
-def vcodec(file_path):
-    cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name", "-of", "csv=p=0", file_path]
-    codec = subprocess.check_output(cmd).decode(errors='ignore').strip()
-    return codec
+        fps_str = stream.get('r_frame_rate', '30/1')
+        try:
+            num, denom = map(int, fps_str.split('/'))
+            fps = num / denom if denom != 0 else 30.0
+        except (ValueError, ZeroDivisionError):
+            fps = 30.0
 
-def vresolution(file_path):
-    cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", file_path]
-    res = subprocess.check_output(cmd).decode(errors='ignore').strip()
-    parts = res.split('x')
-    if len(parts) == 2:
-        return int(parts[0]), int(parts[1])
-    return 0, 0
+        return {
+            'width': int(stream.get('width', 0)),
+            'height': int(stream.get('height', 0)),
+            'codec': stream.get('codec_name', ''),
+            'fps': fps
+        }
+    except Exception:
+        return None
+
 
 
 def run_process(cmd, log_callback, process_callback=None):
@@ -109,16 +114,20 @@ def split_video(input_path, mode, output_dir, conversion="none", log_callback=No
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
-    fps = frame_rate(input_path) if not have(fps) else fps
+    if log_callback: log_callback(f"Detecting metadata for {input_path}...")
+    vinfo = get_video_info(input_path)
+    if not vinfo:
+        raise Exception(f"Failed to get video info for {input_path}")
+
+    fps = vinfo['fps'] if not have(fps) else float(fps)
     filename = os.path.splitext(os.path.basename(input_path))[0]
     ext = os.path.splitext(input_path)[1]
     ext = get_ext_from_codec(out_codec, ext)
     width = 'iw' if not have(width) else width
     height = 'ih' if not have(height) else height    
     
-    if log_callback: log_callback(f"Detecting codec for {input_path}...")
-    codec = vcodec(input_path)
-    w_in, h_in = vresolution(input_path)
+    codec = vinfo['codec']
+    w_in, h_in = vinfo['width'], vinfo['height']
     wi, hi = w_in, h_in
 
     if mode in ('left_and_right', 'left', 'right'):
@@ -159,7 +168,8 @@ def split_video(input_path, mode, output_dir, conversion="none", log_callback=No
         if not input_path2 or not os.path.exists(input_path2):
             raise ValueError("mode='pack' requires a valid input_path2 (mask SBS video)")
         
-        codec2 = vcodec(input_path2)
+        vinfo2 = get_video_info(input_path2)
+        codec2 = vinfo2['codec'] if vinfo2 else ""
         decoder_opts2 = []
         if codec2 in ('h264', 'hevc'):
             decoder_opts2 = ["-hwaccel", "auto"]
@@ -331,9 +341,12 @@ def combine_video(input_path_1, input_path_2, mode, output_path, conversion="non
 
     if log_callback: log_callback(f"Combining {input_path_1} and {input_path_2} into {output_path} (Mode: {mode}, Conv: {conversion})")
 
-    fps = frame_rate(input_path_1) if not have(fps) else fps
-    codec1 = vcodec(input_path_1)
-    w_in, h_in = vresolution(input_path_1)
+    vinfo1 = get_video_info(input_path_1)
+    if not vinfo1:
+        raise Exception(f"Failed to get video info for {input_path_1}")
+    fps = vinfo1['fps'] if not have(fps) else float(fps)
+    codec1 = vinfo1['codec']
+    w_in, h_in = vinfo1['width'], vinfo1['height']
     
     out_w = w_in * 2 if mode == "left_right" else w_in
     out_h = h_in * 2 if mode == "top_bottom" else h_in
@@ -347,7 +360,8 @@ def combine_video(input_path_1, input_path_2, mode, output_path, conversion="non
     if codec1 in ('h264', 'hevc'):
         input_opts_1 = ["-hwaccel", "auto"]
         
-    codec2 = vcodec(input_path_2)
+    vinfo2 = get_video_info(input_path_2)
+    codec2 = vinfo2['codec'] if vinfo2 else ""
     input_opts_2 = []
     if codec2 in ('h264', 'hevc'):
         input_opts_2 = ["-hwaccel", "auto"]
@@ -425,9 +439,12 @@ def combine_video(input_path_1, input_path_2, mode, output_path, conversion="non
 def tb_to_sbs(input_path, output_path, conversion="none", log_callback=None, process_callback=None, bitrate="100M", operation_mode="custom_tb_to_sbs", mask_path=None, fps=None, height=None, width=None, out_codec="h265-main10-win-nvidia"):
     if log_callback: log_callback(f"Converting video for {input_path} (conv={conversion}, op={operation_mode})")
     
-    fps = frame_rate(input_path) if not have(fps) else fps
-    codec = vcodec(input_path)
-    w_in, h_in = vresolution(input_path)
+    vinfo = get_video_info(input_path)
+    if not vinfo:
+        raise Exception(f"Failed to get video info for {input_path}")
+    fps = vinfo['fps'] if not have(fps) else float(fps)
+    codec = vinfo['codec']
+    w_in, h_in = vinfo['width'], vinfo['height']
     wi, hi = w_in, h_in
     if operation_mode == "sbs_to_sbs":
         wi = w_in // 2 if w_in > 0 else 0
