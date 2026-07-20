@@ -1,0 +1,3 @@
+## 2026-06-21 - [Consolidated and Cached ffprobe Queries]
+**Learning:** Sequential subprocess spawns (such as calling `ffprobe` multiple times to fetch different parts of a video file's metadata) are major latency bottlenecks, especially under containerized or heavily resource-constrained environments. By consolidating multiple ffprobe queries into a single call with JSON output and caching the parsed results with `lru_cache`, metadata retrieval is speeded up by multiple orders of magnitude.
+**Action:** Always combine sequential or repetitive command line / subprocess metadata queries into unified calls returning structured formats (like JSON) and cache them when the underlying data is immutable during the process lifecycle.
