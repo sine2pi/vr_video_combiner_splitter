@@ -1,6 +1,6 @@
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-import os, threading, subprocess, json
+import os, threading, subprocess, json, functools
 
 def have(a):
     return a is not None and str(a).strip() != ""
@@ -11,35 +11,64 @@ def aorb(a, b):
 def aborc(a, b, c):
     return aorb(a, b) if not have(c) else c
 
-def bitrate(input_file):
-    cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', input_file]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    data = json.loads(result.stdout)
-    bitrate = data.get('format', {}).get('bit_rate')
-    return None
+@functools.lru_cache(maxsize=128)
+def get_video_info(file_path):
+    """
+    Consolidates video resolution, codec, and frame rate retrieval into a single ffprobe call.
+    Uses JSON output to avoid spawning multiple ffprobe sub-processes.
+    Result is cached via functools.lru_cache to eliminate overhead on subsequent lookups.
+    """
+    cmd = [
+        'ffprobe', '-v', 'error', '-select_streams', 'v:0',
+        '-show_entries', 'stream=width,height,codec_name,r_frame_rate',
+        '-of', 'json', file_path
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        info = json.loads(result.stdout)
+        streams = info.get('streams', [])
+        if streams:
+            stream = streams[0]
+
+            # Parse frame rate
+            fps_str = stream.get('r_frame_rate', '30/1')
+            try:
+                num, denom = map(int, fps_str.split('/'))
+                fps = num / denom if denom != 0 else 30.0
+            except Exception:
+                fps = 30.0
+
+            # Parse resolution
+            width = stream.get('width', 0)
+            height = stream.get('height', 0)
+
+            # Parse codec name
+            codec = stream.get('codec_name', '')
+
+            return {
+                'fps': fps,
+                'width': int(width) if width else 0,
+                'height': int(height) if height else 0,
+                'codec': str(codec)
+            }
+    except Exception as e:
+        print(f"Error querying video info: {e}")
+
+    # Return sensible default values on error
+    return {'fps': 30.0, 'width': 0, 'height': 0, 'codec': ''}
 
 def frame_rate(file_path):
-    cmd = ['ffprobe','-v', 'error','-select_streams', 'v:0','-show_entries', 'stream=width,height,duration,r_frame_rate,nb_frames','-of', 'json', file_path]
-    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-    info = json.loads(result.stdout)
-    stream = info['streams'][0]
-    fps_str = stream.get('r_frame_rate', '30/1')
-    num, denom = map(int, fps_str.split('/'))
-    fps = num / denom if denom != 0 else 30.0
-    return fps
+    """Backward-compatible wrapper for get_video_info frame rate lookup."""
+    return get_video_info(file_path)['fps']
 
 def vcodec(file_path):
-    cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name", "-of", "csv=p=0", file_path]
-    codec = subprocess.check_output(cmd).decode(errors='ignore').strip()
-    return codec
+    """Backward-compatible wrapper for get_video_info video codec lookup."""
+    return get_video_info(file_path)['codec']
 
 def vresolution(file_path):
-    cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", file_path]
-    res = subprocess.check_output(cmd).decode(errors='ignore').strip()
-    parts = res.split('x')
-    if len(parts) == 2:
-        return int(parts[0]), int(parts[1])
-    return 0, 0
+    """Backward-compatible wrapper for get_video_info video resolution lookup."""
+    info = get_video_info(file_path)
+    return info['width'], info['height']
 
 
 def run_process(cmd, log_callback, process_callback=None):
