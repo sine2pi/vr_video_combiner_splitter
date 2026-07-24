@@ -1,0 +1,3 @@
+## 2026-06-25 - Caching & Consolidating ffprobe Metadata Requests
+**Learning:** Repetitive spawning of `ffprobe` processes to fetch individual video stream properties (width, height, codec, frame rate) separately incurs a massive OS overhead (~150-300ms per spawn). We can query all desired parameters in a single JSON-formatted `-of json` query, parse it once, and cache it using `@functools.lru_cache` to virtually eliminate subprocessing overhead on subsequent accesses.
+**Action:** Consolidate multiple scalar metadata inquiries into a single, comprehensive dict-returning function decorated with `lru_cache`, and write lightweight wrappers to access specific fields. Keep line endings aligned with the repository defaults.
