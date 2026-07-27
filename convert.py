@@ -1,6 +1,6 @@
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-import os, threading, subprocess, json
+import os, threading, subprocess, json, functools
 
 def have(a):
     return a is not None and str(a).strip() != ""
@@ -11,35 +11,53 @@ def aorb(a, b):
 def aborc(a, b, c):
     return aorb(a, b) if not have(c) else c
 
-def bitrate(input_file):
-    cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', input_file]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    data = json.loads(result.stdout)
-    bitrate = data.get('format', {}).get('bit_rate')
-    return None
-
-def frame_rate(file_path):
-    cmd = ['ffprobe','-v', 'error','-select_streams', 'v:0','-show_entries', 'stream=width,height,duration,r_frame_rate,nb_frames','-of', 'json', file_path]
+@functools.lru_cache(maxsize=128)
+def get_video_info(file_path):
+    """
+    Performance Optimization:
+    Consolidates metadata queries (fps, codec, width, height) into a single ffprobe call
+    and caches the parsed dictionary using @functools.lru_cache to eliminate redundant
+    subprocess spawning and file reading operations.
+    """
+    cmd = [
+        'ffprobe',
+        '-v', 'error',
+        '-select_streams', 'v:0',
+        '-show_entries', 'stream=width,height,r_frame_rate,codec_name',
+        '-of', 'json',
+        file_path
+    ]
     result = subprocess.run(cmd, capture_output=True, text=True, check=True)
     info = json.loads(result.stdout)
-    stream = info['streams'][0]
+    streams = info.get('streams', [])
+    if not streams:
+        raise ValueError(f'No video streams found in {file_path}')
+    stream = streams[0]
+
     fps_str = stream.get('r_frame_rate', '30/1')
     num, denom = map(int, fps_str.split('/'))
     fps = num / denom if denom != 0 else 30.0
-    return fps
+
+    codec = stream.get('codec_name', '')
+    width = int(stream.get('width', 0))
+    height = int(stream.get('height', 0))
+
+    return {
+        'fps': fps,
+        'codec': codec,
+        'width': width,
+        'height': height
+    }
+
+def frame_rate(file_path):
+    return get_video_info(file_path)['fps']
 
 def vcodec(file_path):
-    cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name", "-of", "csv=p=0", file_path]
-    codec = subprocess.check_output(cmd).decode(errors='ignore').strip()
-    return codec
+    return get_video_info(file_path)['codec']
 
 def vresolution(file_path):
-    cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", file_path]
-    res = subprocess.check_output(cmd).decode(errors='ignore').strip()
-    parts = res.split('x')
-    if len(parts) == 2:
-        return int(parts[0]), int(parts[1])
-    return 0, 0
+    info = get_video_info(file_path)
+    return info['width'], info['height']
 
 
 def run_process(cmd, log_callback, process_callback=None):
