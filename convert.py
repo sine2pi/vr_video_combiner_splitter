@@ -1,6 +1,6 @@
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-import os, threading, subprocess, json
+import os, threading, subprocess, json, functools
 
 def have(a):
     return a is not None and str(a).strip() != ""
@@ -11,35 +11,47 @@ def aorb(a, b):
 def aborc(a, b, c):
     return aorb(a, b) if not have(c) else c
 
-def bitrate(input_file):
-    cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', input_file]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    data = json.loads(result.stdout)
-    bitrate = data.get('format', {}).get('bit_rate')
-    return None
+@functools.lru_cache(maxsize=128)
+def get_video_info(file_path):
+    """
+    Consolidates video metadata retrieval (width, height, codec, fps) into a single ffprobe call
+    and caches results to minimize slow subprocess process spawning.
+    """
+    cmd = [
+        'ffprobe', '-v', 'error', '-select_streams', 'v:0',
+        '-show_entries', 'stream=width,height,codec_name,r_frame_rate',
+        '-of', 'json', file_path
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        info = json.loads(result.stdout)
+        if 'streams' in info and len(info['streams']) > 0:
+            stream = info['streams'][0]
+            fps_str = stream.get('r_frame_rate', '30/1')
+            num, denom = map(int, fps_str.split('/'))
+            fps = num / denom if denom != 0 else 30.0
+            return {
+                'width': int(stream.get('width', 0)),
+                'height': int(stream.get('height', 0)),
+                'codec': stream.get('codec_name', '').strip(),
+                'fps': fps
+            }
+    except Exception as e:
+        pass
+    return {'width': 0, 'height': 0, 'codec': '', 'fps': 30.0}
 
 def frame_rate(file_path):
-    cmd = ['ffprobe','-v', 'error','-select_streams', 'v:0','-show_entries', 'stream=width,height,duration,r_frame_rate,nb_frames','-of', 'json', file_path]
-    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-    info = json.loads(result.stdout)
-    stream = info['streams'][0]
-    fps_str = stream.get('r_frame_rate', '30/1')
-    num, denom = map(int, fps_str.split('/'))
-    fps = num / denom if denom != 0 else 30.0
-    return fps
+    """Legacy metadata wrapper using the cached get_video_info."""
+    return get_video_info(file_path)['fps']
 
 def vcodec(file_path):
-    cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name", "-of", "csv=p=0", file_path]
-    codec = subprocess.check_output(cmd).decode(errors='ignore').strip()
-    return codec
+    """Legacy metadata wrapper using the cached get_video_info."""
+    return get_video_info(file_path)['codec']
 
 def vresolution(file_path):
-    cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", file_path]
-    res = subprocess.check_output(cmd).decode(errors='ignore').strip()
-    parts = res.split('x')
-    if len(parts) == 2:
-        return int(parts[0]), int(parts[1])
-    return 0, 0
+    """Legacy metadata wrapper using the cached get_video_info."""
+    info = get_video_info(file_path)
+    return info['width'], info['height']
 
 
 def run_process(cmd, log_callback, process_callback=None):
