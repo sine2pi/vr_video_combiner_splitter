@@ -1,6 +1,6 @@
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-import os, threading, subprocess, json, functools
+import os, threading, subprocess, json, functools, queue
 
 def have(a):
     return a is not None and str(a).strip() != ""
@@ -12,19 +12,20 @@ def aborc(a, b, c):
     return aorb(a, b) if not have(c) else c
 
 @functools.lru_cache(maxsize=128)
-def get_video_info(file_path):
+def _cached_get_video_info(abs_path):
+    # Retrieve video info using ffprobe; cached by absolute path to eliminate duplicate processes
     cmd = [
         'ffprobe',
         '-v', 'error',
         '-select_streams', 'v:0',
         '-show_entries', 'stream=width,height,codec_name,r_frame_rate',
         '-of', 'json',
-        file_path
+        abs_path
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, check=True)
     info = json.loads(result.stdout)
     if 'streams' not in info or not info['streams']:
-        raise ValueError(f"No video streams found in {file_path}")
+        raise ValueError(f"No video streams found in {abs_path}")
     stream = info['streams'][0]
 
     fps_str = stream.get('r_frame_rate', '30/1')
@@ -44,6 +45,11 @@ def get_video_info(file_path):
         'width': width,
         'height': height
     }
+
+def get_video_info(file_path):
+    # Normalize path using absolute & normpath to ensure identical files share a cache entry
+    normalized_path = os.path.abspath(os.path.normpath(file_path))
+    return _cached_get_video_info(normalized_path)
 
 def frame_rate(file_path):
     return get_video_info(file_path)['fps']
@@ -698,18 +704,51 @@ class VRSplitCombineApp:
         scrollbar.pack(side='right', fill='y')
         self.log_text.config(yscrollcommand=scrollbar.set)
 
+        # Thread-safe batch log queue initialization
+        self.log_queue = queue.Queue()
+        self.root.after(100, self.process_log_queue)
+
     def go_back(self):
         if self.on_return:
             self.on_return()
         else:
             self.root.quit()
 
+    def process_log_queue(self):
+        # Periodically drains the log queue and appends logs in batches to minimize UI thread redrawing overhead
+        messages = []
+        while True:
+            try:
+                msg = self.log_queue.get_nowait()
+                messages.append(msg)
+            except queue.Empty:
+                break
+        if messages:
+            self.log_text.config(state='normal')
+            self.log_text.insert('end', "\n".join(messages) + "\n")
+            self.log_text.see('end')
+            self.log_text.config(state='disabled')
+            self.root.update_idletasks()
+        self.root.after(100, self.process_log_queue)
+
     def log(self, message):
-        self.log_text.config(state='normal')
-        self.log_text.insert('end', message + "\n")
-        self.log_text.see('end')
-        self.log_text.config(state='disabled')
-        self.root.update_idletasks()
+        # Thread-safe log method that appends to queue and flushes synchronously if called from the main thread
+        self.log_queue.put(message.rstrip('\r\n'))
+        if threading.current_thread() is threading.main_thread():
+            # Drain queue immediately on main thread to keep initialization logs instantaneous
+            messages = []
+            while True:
+                try:
+                    msg = self.log_queue.get_nowait()
+                    messages.append(msg)
+                except queue.Empty:
+                    break
+            if messages:
+                self.log_text.config(state='normal')
+                self.log_text.insert('end', "\n".join(messages) + "\n")
+                self.log_text.see('end')
+                self.log_text.config(state='disabled')
+                self.root.update_idletasks()
 
     def setup_split_tab(self):
         frame_input = ttk.Frame(self.tab_split)
