@@ -1,6 +1,6 @@
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-import os, threading, subprocess, json, functools
+import os, threading, subprocess, json, functools, queue
 
 def have(a):
     return a is not None and str(a).strip() != ""
@@ -12,19 +12,21 @@ def aborc(a, b, c):
     return aorb(a, b) if not have(c) else c
 
 @functools.lru_cache(maxsize=128)
-def get_video_info(file_path):
+def _get_video_info_cached(normalized_path):
+    # This is the actual cached metadata-retrieval function.
+    # It takes a normalized, absolute path to guarantee high cache-hit rates.
     cmd = [
         'ffprobe',
         '-v', 'error',
         '-select_streams', 'v:0',
         '-show_entries', 'stream=width,height,codec_name,r_frame_rate',
         '-of', 'json',
-        file_path
+        normalized_path
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, check=True)
     info = json.loads(result.stdout)
     if 'streams' not in info or not info['streams']:
-        raise ValueError(f"No video streams found in {file_path}")
+        raise ValueError(f"No video streams found in {normalized_path}")
     stream = info['streams'][0]
 
     fps_str = stream.get('r_frame_rate', '30/1')
@@ -44,6 +46,15 @@ def get_video_info(file_path):
         'width': width,
         'height': height
     }
+
+def get_video_info(file_path):
+    # Normalize the file path prior to looking it up in the LRU cache.
+    # This converts relative paths, nested dirs, or duplicate separators
+    # into a uniform key, avoiding redundant ffprobe invocations.
+    if not file_path:
+        return {'fps': 30.0, 'codec': '', 'width': 0, 'height': 0}
+    normalized = os.path.abspath(os.path.normpath(file_path))
+    return _get_video_info_cached(normalized)
 
 def frame_rate(file_path):
     return get_video_info(file_path)['fps']
@@ -697,6 +708,8 @@ class VRSplitCombineApp:
         scrollbar = ttk.Scrollbar(log_frame, command=self.log_text.yview)
         scrollbar.pack(side='right', fill='y')
         self.log_text.config(yscrollcommand=scrollbar.set)
+        self.log_queue = queue.Queue()
+        self.root.after(100, self.poll_log_queue)
 
     def go_back(self):
         if self.on_return:
@@ -705,11 +718,29 @@ class VRSplitCombineApp:
             self.root.quit()
 
     def log(self, message):
-        self.log_text.config(state='normal')
-        self.log_text.insert('end', message + "\n")
-        self.log_text.see('end')
-        self.log_text.config(state='disabled')
-        self.root.update_idletasks()
+        # High performance queue-based logging: avoids blocking the worker thread
+        # and eliminates thread-safety issues of directly updating GUI widgets.
+        self.log_queue.put(message)
+
+    def poll_log_queue(self):
+        # Retrieve all pending logs from the queue and write them to the text area
+        # in a single batch to maximize rendering performance and reduce UI latency.
+        logs_batch = []
+        while True:
+            try:
+                msg = self.log_queue.get_nowait()
+                logs_batch.append(msg)
+            except queue.Empty:
+                break
+
+        if logs_batch:
+            self.log_text.config(state='normal')
+            self.log_text.insert('end', "\n".join(logs_batch) + "\n")
+            self.log_text.see('end')
+            self.log_text.config(state='disabled')
+
+        # Reschedule queue polling on the main Tkinter thread
+        self.root.after(100, self.poll_log_queue)
 
     def setup_split_tab(self):
         frame_input = ttk.Frame(self.tab_split)
