@@ -1,6 +1,6 @@
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-import os, threading, subprocess, json, functools
+import os, threading, subprocess, json, functools, queue
 
 def have(a):
     return a is not None and str(a).strip() != ""
@@ -12,19 +12,21 @@ def aborc(a, b, c):
     return aorb(a, b) if not have(c) else c
 
 @functools.lru_cache(maxsize=128)
-def get_video_info(file_path):
+def _get_video_info_cached(normalized_path):
+    # This is the actual cached metadata-retrieval function.
+    # It takes a normalized, absolute path to guarantee high cache-hit rates.
     cmd = [
         'ffprobe',
         '-v', 'error',
         '-select_streams', 'v:0',
         '-show_entries', 'stream=width,height,codec_name,r_frame_rate',
         '-of', 'json',
-        file_path
+        normalized_path
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, check=True)
     info = json.loads(result.stdout)
     if 'streams' not in info or not info['streams']:
-        raise ValueError(f"No video streams found in {file_path}")
+        raise ValueError(f"No video streams found in {normalized_path}")
     stream = info['streams'][0]
 
     fps_str = stream.get('r_frame_rate', '30/1')
@@ -44,6 +46,15 @@ def get_video_info(file_path):
         'width': width,
         'height': height
     }
+
+def get_video_info(file_path):
+    # Normalize the file path prior to looking it up in the LRU cache.
+    # This converts relative paths, nested dirs, or duplicate separators
+    # into a uniform key, avoiding redundant ffprobe invocations.
+    if not file_path:
+        return {'fps': 30.0, 'codec': '', 'width': 0, 'height': 0}
+    normalized = os.path.abspath(os.path.normpath(file_path))
+    return _get_video_info_cached(normalized)
 
 def frame_rate(file_path):
     return get_video_info(file_path)['fps']
@@ -65,7 +76,10 @@ def run_process(cmd, log_callback, process_callback=None):
     if process_callback: process_callback(process)
 
     for line in process.stdout:
-        if log_callback: log_callback(line.strip())
+        if log_callback:
+            stripped = line.strip()
+            if stripped:
+                log_callback(stripped)
     process.wait()
     if process.returncode != 0:
         raise Exception(f"Command failed with code {process.returncode}")
@@ -121,7 +135,9 @@ def split_video(input_path, mode, output_dir, conversion="none", log_callback=No
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
-    fps = frame_rate(input_path) if not have(fps) else fps
+    # Perform a single unified video metadata query to avoid multiple redundant cache lookups.
+    video_info = get_video_info(input_path)
+    fps = video_info['fps'] if not have(fps) else fps
     filename = os.path.splitext(os.path.basename(input_path))[0]
     ext = os.path.splitext(input_path)[1]
     ext = get_ext_from_codec(out_codec, ext)
@@ -129,8 +145,8 @@ def split_video(input_path, mode, output_dir, conversion="none", log_callback=No
     height = 'ih' if not have(height) else height
 
     if log_callback: log_callback(f"Detecting codec for {input_path}...")
-    codec = vcodec(input_path)
-    w_in, h_in = vresolution(input_path)
+    codec = video_info['codec']
+    w_in, h_in = video_info['width'], video_info['height']
     wi, hi = w_in, h_in
 
     if mode in ('left_and_right', 'left', 'right'):
@@ -343,9 +359,11 @@ def combine_video(input_path_1, input_path_2, mode, output_path, conversion="non
 
     if log_callback: log_callback(f"Combining {input_path_1} and {input_path_2} into {output_path} (Mode: {mode}, Conv: {conversion})")
 
-    fps = frame_rate(input_path_1) if not have(fps) else fps
-    codec1 = vcodec(input_path_1)
-    w_in, h_in = vresolution(input_path_1)
+    # Perform a single unified video metadata query to avoid multiple redundant cache lookups.
+    video_info1 = get_video_info(input_path_1)
+    fps = video_info1['fps'] if not have(fps) else fps
+    codec1 = video_info1['codec']
+    w_in, h_in = video_info1['width'], video_info1['height']
 
     # out_w = w_in * 2 if mode == "left_right" else w_in
     # out_h = h_in * 2 if mode == "top_bottom" else h_in
@@ -437,9 +455,11 @@ def combine_video(input_path_1, input_path_2, mode, output_path, conversion="non
 def tb_to_sbs(input_path, output_path, conversion="none", log_callback=None, process_callback=None, bitrate="100M", operation_mode="custom_tb_to_sbs", mask_path=None, fps=None, height=None, width=None, out_codec="h265-main10-win-nvidia"):
     if log_callback: log_callback(f"Converting video for {input_path} (conv={conversion}, op={operation_mode})")
 
-    fps = frame_rate(input_path) if not have(fps) else fps
-    codec = vcodec(input_path)
-    w_in, h_in = vresolution(input_path)
+    # Perform a single unified video metadata query to avoid multiple redundant cache lookups.
+    video_info = get_video_info(input_path)
+    fps = video_info['fps'] if not have(fps) else fps
+    codec = video_info['codec']
+    w_in, h_in = video_info['width'], video_info['height']
     wi, hi = w_in, h_in
     if operation_mode == "sbs_to_sbs":
         wi = w_in // 2 if w_in > 0 else 0
@@ -697,6 +717,8 @@ class VRSplitCombineApp:
         scrollbar = ttk.Scrollbar(log_frame, command=self.log_text.yview)
         scrollbar.pack(side='right', fill='y')
         self.log_text.config(yscrollcommand=scrollbar.set)
+        self.log_queue = queue.Queue()
+        self.root.after(100, self.poll_log_queue)
 
     def go_back(self):
         if self.on_return:
@@ -705,11 +727,37 @@ class VRSplitCombineApp:
             self.root.quit()
 
     def log(self, message):
-        self.log_text.config(state='normal')
-        self.log_text.insert('end', message + "\n")
-        self.log_text.see('end')
-        self.log_text.config(state='disabled')
-        self.root.update_idletasks()
+        # High performance queue-based logging: avoids blocking the worker thread
+        # and eliminates thread-safety issues of directly updating GUI widgets.
+        if message and message.strip():
+            self.log_queue.put(message)
+
+    def poll_log_queue(self):
+        # Retrieve all pending logs from the queue and write them to the text area
+        # in a single batch to maximize rendering performance and reduce UI latency.
+        logs_batch = []
+        while True:
+            try:
+                msg = self.log_queue.get_nowait()
+                logs_batch.append(msg)
+            except queue.Empty:
+                break
+
+        if logs_batch:
+            self.log_text.config(state='normal')
+            self.log_text.insert('end', "\n".join(logs_batch) + "\n")
+
+            # Cap the log text lines to 1000 to prevent memory bloat and UI lag
+            total_lines = int(self.log_text.index('end-1c').split('.')[0])
+            if total_lines > 1000:
+                lines_to_delete = total_lines - 1000
+                self.log_text.delete('1.0', f'{lines_to_delete + 1}.0')
+
+            self.log_text.see('end')
+            self.log_text.config(state='disabled')
+
+        # Reschedule queue polling on the main Tkinter thread
+        self.root.after(100, self.poll_log_queue)
 
     def setup_split_tab(self):
         frame_input = ttk.Frame(self.tab_split)
