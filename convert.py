@@ -1,6 +1,6 @@
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-import os, threading, subprocess, json, functools
+import os, threading, subprocess, json, functools, queue
 
 def have(a):
     return a is not None and str(a).strip() != ""
@@ -11,8 +11,13 @@ def aorb(a, b):
 def aborc(a, b, c):
     return aorb(a, b) if not have(c) else c
 
-@functools.lru_cache(maxsize=128)
 def get_video_info(file_path):
+    # Normalize path to ensure different representations of the same file path hit the cache
+    normalized_path = os.path.abspath(os.path.normpath(file_path))
+    return _get_video_info_cached(normalized_path)
+
+@functools.lru_cache(maxsize=128)
+def _get_video_info_cached(file_path):
     cmd = [
         'ffprobe',
         '-v', 'error',
@@ -65,7 +70,9 @@ def run_process(cmd, log_callback, process_callback=None):
     if process_callback: process_callback(process)
 
     for line in process.stdout:
-        if log_callback: log_callback(line.strip())
+        stripped = line.strip()
+        if stripped and log_callback:
+            log_callback(stripped)
     process.wait()
     if process.returncode != 0:
         raise Exception(f"Command failed with code {process.returncode}")
@@ -697,6 +704,8 @@ class VRSplitCombineApp:
         scrollbar = ttk.Scrollbar(log_frame, command=self.log_text.yview)
         scrollbar.pack(side='right', fill='y')
         self.log_text.config(yscrollcommand=scrollbar.set)
+        self.log_queue = queue.Queue()
+        self.root.after(100, self.poll_log_queue)
 
     def go_back(self):
         if self.on_return:
@@ -705,11 +714,32 @@ class VRSplitCombineApp:
             self.root.quit()
 
     def log(self, message):
-        self.log_text.config(state='normal')
-        self.log_text.insert('end', message + "\n")
-        self.log_text.see('end')
-        self.log_text.config(state='disabled')
-        self.root.update_idletasks()
+        # Push log message to the thread-safe queue
+        self.log_queue.put(message)
+
+    def poll_log_queue(self):
+        # Poll and batch log messages to update UI on main thread safely
+        messages = []
+        try:
+            while True:
+                messages.append(self.log_queue.get_nowait())
+        except queue.Empty:
+            pass
+
+        if messages:
+            self.log_text.config(state='normal')
+            for msg in messages:
+                self.log_text.insert('end', msg + "\n")
+
+            # Limit display to 1000 lines to prevent UI redraw slowdown and memory bloat
+            current_lines = int(self.log_text.index('end-1c').split('.')[0])
+            if current_lines > 1000:
+                self.log_text.delete('1.0', f'{current_lines - 1000}.0')
+
+            self.log_text.see('end')
+            self.log_text.config(state='disabled')
+
+        self.root.after(100, self.poll_log_queue)
 
     def setup_split_tab(self):
         frame_input = ttk.Frame(self.tab_split)
