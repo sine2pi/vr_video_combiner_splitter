@@ -1,0 +1,3 @@
+## 2026-08-10 - Tkinter Thread-Safe Logging and Cache Path Normalization
+**Learning:** Directly modifying Tkinter widgets (like inserting log messages) from background worker threads causes severe UI thread-safety violations and lag under high throughput. Batching log entries using a thread-safe `queue.Queue` polled by `root.after` on the main thread resolves UI freezing. Additionally, python `@functools.lru_cache` evaluates path strings literally, meaning `./video.mp4` and `video.mp4` miss the cache; path normalization is required.
+**Action:** Use queue-based batch UI updates for high-frequency logs in single-threaded GUIs, and always normalize file paths before passing them to an LRU-cached function.
