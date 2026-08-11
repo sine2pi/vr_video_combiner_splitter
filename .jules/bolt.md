@@ -1,0 +1,3 @@
+## 2026-06-25 - Thread-safe and Batched Tkinter Logging
+**Learning:** Directly updating Tkinter GUI widgets (like a log Text widget) and calling `update_idletasks()` from background worker threads violates Tkinter's single-threaded nature, leading to potential segmentation faults, hangs, and severe UI lag under high-frequency logging from processes like FFmpeg.
+**Action:** Route log messages from background threads through a thread-safe `queue.Queue` and poll the queue periodically (e.g., every 100ms) on the Tkinter main thread using `after`. Batch-process the queue contents to minimize costly UI redraw operations, and cap the text widget length to prevent memory bloat.
