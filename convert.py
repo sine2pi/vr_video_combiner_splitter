@@ -1,6 +1,6 @@
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-import os, threading, subprocess, json, functools
+import os, threading, subprocess, json, functools, queue
 
 def have(a):
     return a is not None and str(a).strip() != ""
@@ -12,7 +12,7 @@ def aborc(a, b, c):
     return aorb(a, b) if not have(c) else c
 
 @functools.lru_cache(maxsize=128)
-def get_video_info(file_path):
+def _get_video_info_cached(file_path):
     cmd = [
         'ffprobe',
         '-v', 'error',
@@ -45,6 +45,11 @@ def get_video_info(file_path):
         'height': height
     }
 
+def get_video_info(file_path):
+    """Retrieves video metadata (fps, codec, width, height) utilizing cached lookups on normalized paths."""
+    norm_path = os.path.abspath(os.path.normpath(file_path))
+    return _get_video_info_cached(norm_path)
+
 def frame_rate(file_path):
     return get_video_info(file_path)['fps']
 
@@ -65,7 +70,9 @@ def run_process(cmd, log_callback, process_callback=None):
     if process_callback: process_callback(process)
 
     for line in process.stdout:
-        if log_callback: log_callback(line.strip())
+        stripped = line.strip()
+        if stripped:
+            if log_callback: log_callback(stripped)
     process.wait()
     if process.returncode != 0:
         raise Exception(f"Command failed with code {process.returncode}")
@@ -698,6 +705,9 @@ class VRSplitCombineApp:
         scrollbar.pack(side='right', fill='y')
         self.log_text.config(yscrollcommand=scrollbar.set)
 
+        self.log_queue = queue.Queue()
+        self.root.after(100, self.poll_log_queue)
+
     def go_back(self):
         if self.on_return:
             self.on_return()
@@ -705,11 +715,30 @@ class VRSplitCombineApp:
             self.root.quit()
 
     def log(self, message):
-        self.log_text.config(state='normal')
-        self.log_text.insert('end', message + "\n")
-        self.log_text.see('end')
-        self.log_text.config(state='disabled')
-        self.root.update_idletasks()
+        """Enqueues a message for thread-safe UI logging on the main thread."""
+        self.log_queue.put(message)
+
+    def poll_log_queue(self):
+        """Periodically polls log queue on main thread to batch write log updates and cap log lines."""
+        lines = []
+        while not self.log_queue.empty():
+            try:
+                lines.append(self.log_queue.get_nowait())
+            except queue.Empty:
+                break
+        if lines:
+            self.log_text.config(state='normal')
+            for line in lines:
+                self.log_text.insert('end', line + "\n")
+
+            # Prevent memory bloat and UI redraw lag by capping to 1000 lines
+            num_lines = int(self.log_text.index('end-1c').split('.')[0])
+            if num_lines > 1000:
+                self.log_text.delete('1.0', f'{num_lines - 1000}.0')
+
+            self.log_text.see('end')
+            self.log_text.config(state='disabled')
+        self.root.after(100, self.poll_log_queue)
 
     def setup_split_tab(self):
         frame_input = ttk.Frame(self.tab_split)
