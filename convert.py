@@ -1,6 +1,6 @@
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-import os, threading, subprocess, json, functools
+import os, threading, subprocess, json, functools, queue
 
 def have(a):
     return a is not None and str(a).strip() != ""
@@ -65,7 +65,9 @@ def run_process(cmd, log_callback, process_callback=None):
     if process_callback: process_callback(process)
 
     for line in process.stdout:
-        if log_callback: log_callback(line.strip())
+        stripped = line.strip()
+        if log_callback and stripped:
+            log_callback(stripped)
     process.wait()
     if process.returncode != 0:
         raise Exception(f"Command failed with code {process.returncode}")
@@ -698,6 +700,10 @@ class VRSplitCombineApp:
         scrollbar.pack(side='right', fill='y')
         self.log_text.config(yscrollcommand=scrollbar.set)
 
+        # Thread-safe log queue for batching UI updates
+        self.log_queue = queue.Queue()
+        self.poll_log_queue()
+
     def go_back(self):
         if self.on_return:
             self.on_return()
@@ -705,12 +711,32 @@ class VRSplitCombineApp:
             self.root.quit()
 
     def log(self, message):
-        self.log_text.config(state='normal')
-        self.log_text.insert('end', message + "\n")
-        self.log_text.see('end')
-        self.log_text.config(state='disabled')
-        self.root.update_idletasks()
+        # Enqueue log message for thread-safe batch rendering on main GUI thread
+        if message:
+            self.log_queue.put(str(message))
 
+    def poll_log_queue(self):
+        # Batch process all pending log items to avoid UI main thread lag
+        messages = []
+        while not self.log_queue.empty():
+            try:
+                messages.append(self.log_queue.get_nowait())
+            except queue.Empty:
+                break
+
+        if messages:
+            self.log_text.config(state='normal')
+            self.log_text.insert('end', "\n".join(messages) + "\n")
+
+            # Cap total lines displayed to 1000 to prevent Tkinter Text widget slowdown
+            num_lines = int(self.log_text.index('end-1c').split('.')[0])
+            if num_lines > 1000:
+                self.log_text.delete('1.0', f'{num_lines - 1000 + 1}.0')
+
+            self.log_text.see('end')
+            self.log_text.config(state='disabled')
+
+        self.root.after(100, self.poll_log_queue)
     def setup_split_tab(self):
         frame_input = ttk.Frame(self.tab_split)
         frame_input.pack(fill='x', pady=5)
