@@ -1,6 +1,6 @@
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-import os, threading, subprocess, json, functools
+import os, threading, subprocess, json, functools, queue
 
 def have(a):
     return a is not None and str(a).strip() != ""
@@ -12,19 +12,19 @@ def aborc(a, b, c):
     return aorb(a, b) if not have(c) else c
 
 @functools.lru_cache(maxsize=128)
-def get_video_info(file_path):
+def _get_video_info_cached(norm_path):
     cmd = [
         'ffprobe',
         '-v', 'error',
         '-select_streams', 'v:0',
         '-show_entries', 'stream=width,height,codec_name,r_frame_rate',
         '-of', 'json',
-        file_path
+        norm_path
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, check=True)
     info = json.loads(result.stdout)
     if 'streams' not in info or not info['streams']:
-        raise ValueError(f"No video streams found in {file_path}")
+        raise ValueError(f"No video streams found in {norm_path}")
     stream = info['streams'][0]
 
     fps_str = stream.get('r_frame_rate', '30/1')
@@ -44,6 +44,14 @@ def get_video_info(file_path):
         'width': width,
         'height': height
     }
+
+def get_video_info(file_path):
+    # Path normalization ensures equivalent relative and absolute paths hit LRU cache
+    norm_path = os.path.abspath(os.path.normpath(file_path))
+    return _get_video_info_cached(norm_path)
+
+get_video_info.cache_clear = _get_video_info_cached.cache_clear
+get_video_info.cache_info = _get_video_info_cached.cache_info
 
 def frame_rate(file_path):
     return get_video_info(file_path)['fps']
@@ -65,7 +73,9 @@ def run_process(cmd, log_callback, process_callback=None):
     if process_callback: process_callback(process)
 
     for line in process.stdout:
-        if log_callback: log_callback(line.strip())
+        stripped = line.strip()
+        if stripped and log_callback:
+            log_callback(stripped)
     process.wait()
     if process.returncode != 0:
         raise Exception(f"Command failed with code {process.returncode}")
@@ -698,6 +708,10 @@ class VRSplitCombineApp:
         scrollbar.pack(side='right', fill='y')
         self.log_text.config(yscrollcommand=scrollbar.set)
 
+        # Thread-safe log queue and polling loop
+        self.log_queue = queue.Queue()
+        self.poll_log_queue()
+
     def go_back(self):
         if self.on_return:
             self.on_return()
@@ -705,11 +719,28 @@ class VRSplitCombineApp:
             self.root.quit()
 
     def log(self, message):
+        # Thread-safe log queueing to prevent UI thread lockups and frequent idletasks redraws
+        self.log_queue.put(message)
+
+    def poll_log_queue(self):
+        # Batch log updates to avoid GUI redraw overhead and cap display lines
+        updated = False
         self.log_text.config(state='normal')
-        self.log_text.insert('end', message + "\n")
-        self.log_text.see('end')
+        while not self.log_queue.empty():
+            try:
+                msg = self.log_queue.get_nowait()
+                self.log_text.insert('end', msg + "\n")
+                updated = True
+            except queue.Empty:
+                break
+        if updated:
+            # Cap log display to 1000 lines to prevent memory bloat and UI lag
+            num_lines = int(self.log_text.index('end-1c').split('.')[0])
+            if num_lines > 1000:
+                self.log_text.delete('1.0', f'{num_lines - 1000}.0')
+            self.log_text.see('end')
         self.log_text.config(state='disabled')
-        self.root.update_idletasks()
+        self.root.after(100, self.poll_log_queue)
 
     def setup_split_tab(self):
         frame_input = ttk.Frame(self.tab_split)
