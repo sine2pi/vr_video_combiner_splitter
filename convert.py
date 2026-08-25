@@ -1,6 +1,6 @@
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-import os, threading, subprocess, json, functools
+import os, threading, subprocess, json, functools, queue
 
 def have(a):
     return a is not None and str(a).strip() != ""
@@ -12,7 +12,7 @@ def aborc(a, b, c):
     return aorb(a, b) if not have(c) else c
 
 @functools.lru_cache(maxsize=128)
-def get_video_info(file_path):
+def _get_video_info_cached(file_path):
     cmd = [
         'ffprobe',
         '-v', 'error',
@@ -55,6 +55,11 @@ def vresolution(file_path):
     info = get_video_info(file_path)
     return info['width'], info['height']
 
+def get_video_info(file_path):
+    # Normalize file path so relative and absolute paths share the same LRU cache entry
+    abs_path = os.path.abspath(os.path.normpath(file_path))
+    return _get_video_info_cached(abs_path)
+
 def run_process(cmd, log_callback, process_callback=None):
     if log_callback:
         log_callback(f"Executing: {' '.join(cmd)}")
@@ -65,7 +70,10 @@ def run_process(cmd, log_callback, process_callback=None):
     if process_callback: process_callback(process)
 
     for line in process.stdout:
-        if log_callback: log_callback(line.strip())
+        line_str = line.strip()
+        # Filter out empty lines to avoid redundant log queue/UI updates
+        if line_str and log_callback:
+            log_callback(line_str)
     process.wait()
     if process.returncode != 0:
         raise Exception(f"Command failed with code {process.returncode}")
@@ -663,6 +671,8 @@ class VRSplitCombineApp:
         self.root = root
         self.on_return = on_return
         self.root.title(get_text('title'))
+        # Thread-safe queue for UI log updates
+        self.log_queue = queue.Queue()
 
         self.main_frame = ttk.Frame(root, padding="10")
         self.main_frame.pack(fill='both', expand=True)
@@ -698,6 +708,9 @@ class VRSplitCombineApp:
         scrollbar.pack(side='right', fill='y')
         self.log_text.config(yscrollcommand=scrollbar.set)
 
+        # Start periodic log queue polling on the main thread
+        self.poll_log_queue()
+
     def go_back(self):
         if self.on_return:
             self.on_return()
@@ -705,11 +718,29 @@ class VRSplitCombineApp:
             self.root.quit()
 
     def log(self, message):
-        self.log_text.config(state='normal')
-        self.log_text.insert('end', message + "\n")
-        self.log_text.see('end')
-        self.log_text.config(state='disabled')
-        self.root.update_idletasks()
+        # Non-blocking thread-safe log queuing
+        self.log_queue.put(message)
+
+    def poll_log_queue(self):
+        # Process pending log messages on the main Tkinter thread to avoid UI thread conflicts
+        lines = []
+        while not self.log_queue.empty() and len(lines) < 100:
+            try:
+                lines.append(self.log_queue.get_nowait())
+            except queue.Empty:
+                break
+
+        if lines:
+            self.log_text.config(state='normal')
+            self.log_text.insert('end', '\n'.join(lines) + '\n')
+            # Cap log display to 1000 lines to prevent unbounded memory growth and UI rendering slowdowns
+            num_lines = int(self.log_text.index('end-1c').split('.')[0])
+            if num_lines > 1000:
+                self.log_text.delete('1.0', f'{num_lines - 1000}.0')
+            self.log_text.see('end')
+            self.log_text.config(state='disabled')
+
+        self.root.after(100, self.poll_log_queue)
 
     def setup_split_tab(self):
         frame_input = ttk.Frame(self.tab_split)
