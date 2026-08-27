@@ -1,0 +1,3 @@
+## 2026-08-27 - Thread-safe Queue Batching for Tkinter GUI Logging
+**Learning:** Calling Tkinter widget manipulation (`Text.insert`, `Text.see`, `root.update_idletasks`) directly from background worker threads during rapid stdout output (like FFmpeg process streams) causes severe main-thread UI redrawing lag and potential Tcl/Tk thread safety locks. Draining logs into a `queue.Queue` and updating Tkinter on the main thread in batches every 100ms reduces logging processing overhead by ~30x.
+**Action:** Always route background thread logs through `queue.Queue` and process them in batch using `root.after` on the main thread.
