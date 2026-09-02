@@ -1,6 +1,6 @@
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-import os, threading, subprocess, json, functools
+import os, threading, subprocess, json, functools, queue
 
 def have(a):
     return a is not None and str(a).strip() != ""
@@ -65,7 +65,9 @@ def run_process(cmd, log_callback, process_callback=None):
     if process_callback: process_callback(process)
 
     for line in process.stdout:
-        if log_callback: log_callback(line.strip())
+        line_str = line.strip()
+        if line_str and log_callback:
+            log_callback(line_str)
     process.wait()
     if process.returncode != 0:
         raise Exception(f"Command failed with code {process.returncode}")
@@ -664,6 +666,8 @@ class VRSplitCombineApp:
         self.on_return = on_return
         self.root.title(get_text('title'))
 
+        self.log_queue = queue.Queue()
+
         self.main_frame = ttk.Frame(root, padding="10")
         self.main_frame.pack(fill='both', expand=True)
 
@@ -698,6 +702,8 @@ class VRSplitCombineApp:
         scrollbar.pack(side='right', fill='y')
         self.log_text.config(yscrollcommand=scrollbar.set)
 
+        self.poll_log_queue()
+
     def go_back(self):
         if self.on_return:
             self.on_return()
@@ -705,11 +711,32 @@ class VRSplitCombineApp:
             self.root.quit()
 
     def log(self, message):
-        self.log_text.config(state='normal')
-        self.log_text.insert('end', message + "\n")
-        self.log_text.see('end')
-        self.log_text.config(state='disabled')
-        self.root.update_idletasks()
+        """Thread-safe logging by placing messages into queue.Queue."""
+        if message:
+            self.log_queue.put(str(message))
+
+    def poll_log_queue(self):
+        """Batch-process pending log messages on the main Tkinter thread every 100ms."""
+        lines = []
+        while not self.log_queue.empty():
+            try:
+                lines.append(self.log_queue.get_nowait())
+            except queue.Empty:
+                break
+
+        if lines:
+            self.log_text.config(state='normal')
+            self.log_text.insert('end', "\n".join(lines) + "\n")
+
+            # Cap log display to 1000 lines to prevent UI slowdowns and memory bloat
+            line_count = int(self.log_text.index('end-1c').split('.')[0])
+            if line_count > 1000:
+                self.log_text.delete('1.0', f'{line_count - 1000}.0')
+
+            self.log_text.see('end')
+            self.log_text.config(state='disabled')
+
+        self.root.after(100, self.poll_log_queue)
 
     def setup_split_tab(self):
         frame_input = ttk.Frame(self.tab_split)
