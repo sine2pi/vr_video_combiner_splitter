@@ -1,6 +1,10 @@
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-import os, threading, subprocess, json, functools
+import os, threading, subprocess, json, functools, shutil, tempfile
+from pathlib import Path
+
+FFMPEG_BIN = shutil.which('ffmpeg') or 'ffmpeg'
+FFPROBE_BIN = shutil.which('ffprobe') or 'ffprobe'
 
 def have(a):
     return a is not None and str(a).strip() != ""
@@ -14,7 +18,7 @@ def aborc(a, b, c):
 @functools.lru_cache(maxsize=128)
 def get_video_info(file_path):
     cmd = [
-        'ffprobe',
+        FFPROBE_BIN,
         '-v', 'error',
         '-select_streams', 'v:0',
         '-show_entries', 'stream=width,height,codec_name,r_frame_rate',
@@ -26,14 +30,9 @@ def get_video_info(file_path):
     if 'streams' not in info or not info['streams']:
         raise ValueError(f"No video streams found in {file_path}")
     stream = info['streams'][0]
-
     fps_str = stream.get('r_frame_rate', '30/1')
-    try:
-        num, denom = map(int, fps_str.split('/'))
-        fps = num / denom if denom != 0 else 30.0
-    except Exception:
-        fps = 30.0
-
+    num, denom = map(int, fps_str.split('/'))
+    fps = num / denom if denom != 0 else 30.0
     codec = stream.get('codec_name', '')
     width = int(stream.get('width', 0))
     height = int(stream.get('height', 0))
@@ -54,6 +53,16 @@ def vcodec(file_path):
 def vresolution(file_path):
     info = get_video_info(file_path)
     return info['width'], info['height']
+
+def video_duration(file_path):
+    cmd = [
+        FFPROBE_BIN, '-v', 'error',
+        '-show_entries', 'format=duration',
+        '-of', 'default=noprint_wrappers=1:nokey=1',
+        file_path
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    return float(result.stdout.strip())
 
 def run_process(cmd, log_callback, process_callback=None):
     if log_callback:
@@ -90,6 +99,50 @@ DEFAULT_CODEC = "h265-main10-win-nvidia"
 if DEFAULT_CODEC not in CODEC_OPTIONS:
     DEFAULT_CODEC = CODEC_OPTIONS[0]
 
+HWACCEL_UI_LABELS = {
+    "None": "none",
+    "Auto": "auto",
+    "CUDA (NVIDIA)": "cuda",
+    "Quick Sync (Intel)": "qsv",
+}
+DEFAULT_HWACCEL_LABEL = "Auto"
+
+def _ffmpeg_has_encoder(encoder_name):
+    try:
+        result = subprocess.run([FFMPEG_BIN, '-hide_banner', '-encoders'], capture_output=True, text=True, check=False)
+    except Exception:
+        return True
+    output = (result.stdout or '') + (result.stderr or '')
+    return encoder_name in output
+
+def _ffmpeg_has_filter(filter_name):
+    try:
+        result = subprocess.run([FFMPEG_BIN, '-hide_banner', '-filters'], capture_output=True, text=True, check=False)
+    except Exception:
+        return True
+    output = (result.stdout or '') + (result.stderr or '')
+    return filter_name in output
+
+def get_v360_filter_name():
+    return "v360"
+
+HWACCEL_OPTIONS = {
+    "none": [],
+    "auto": ["-hwaccel", "auto"],
+    "cuda": ["-hwaccel", "cuda"],
+    "qsv": ["-hwaccel", "qsv"],
+}
+
+def get_decoder_opts(codec, hwaccel="auto"):
+
+    if hwaccel not in HWACCEL_OPTIONS:
+        hwaccel = "auto"
+    if hwaccel == "none":
+        return []
+    if codec in ('h264', 'hevc'):
+        return list(HWACCEL_OPTIONS[hwaccel])
+    return []
+
 def get_codec_opts(out_codec, bitrate, include_audio=False):
     opts = ["-fps_mode", "cfr"]
 
@@ -103,7 +156,12 @@ def get_codec_opts(out_codec, bitrate, include_audio=False):
             cbr_opts = enc['bitrateOpts']['cbr'].replace("<CONST_BITRATE_VALUE>", bitrate)
             opts.extend(cbr_opts.split())
     else:
-        opts.extend(["-c:v", "hevc_nvenc", "-profile:v", "main10", "-pix_fmt", "p010le", "-b_ref_mode", "disabled", "-tag:v", "hvc1", "-g", "20", "-rc", "cbr", "-b:v", bitrate, "-maxrate", bitrate, "-bufsize", bitrate])
+        if _ffmpeg_has_encoder("hevc_nvenc"):
+            opts.extend(["-c:v", "hevc_nvenc", "-profile:v", "main10", "-pix_fmt", "p010le", "-b_ref_mode", "disabled", "-tag:v", "hvc1", "-g", "30", "-rc", "cbr", "-b:v", bitrate, "-maxrate", bitrate, "-bufsize", bitrate])
+        elif _ffmpeg_has_encoder("libx265"):
+            opts.extend(["-c:v", "libx265", "-preset", "slow", "-crf", "20", "-pix_fmt", "yuv420p"])
+        else:
+            opts.extend(["-c:v", "hevc", "-pix_fmt", "yuv420p"])
 
     if include_audio:
         opts.extend(["-c:a", "aac", "-b:a", "256k"])
@@ -116,7 +174,40 @@ def get_ext_from_codec(out_codec, original_ext):
         return "." + CODEC_OPTIONS_DICT[out_codec].get("ext", [original_ext.lstrip('.')])[0]
     return original_ext
 
-def split_video(input_path, mode, output_dir, conversion="none", log_callback=None, process_callback=None, bitrate="100M", fps=None, height=None, width=None, out_codec="h265-main10-win-nvidia", input_path2=None, pack_scale=0.40, padding=0):
+@functools.lru_cache(maxsize=16)
+def get_circle_mask(size: int) -> str:
+
+    tmp_dir = Path(tempfile.gettempdir())
+    mask_path = tmp_dir / f"circle_mask_{size}.png"
+
+    if mask_path.exists():
+        return str(mask_path)
+
+    try:
+        from PIL import Image, ImageDraw, ImageFilter
+
+        scale = 4
+        size_hr = size * scale
+        circle_img = Image.new("L", (size_hr, size_hr), 0)
+        draw = ImageDraw.Draw(circle_img)
+        draw.ellipse([0, 0, size_hr - 1, size_hr - 1], fill=255)
+        circle_img = circle_img.resize((size, size), Image.Resampling.LANCZOS)
+        circle_img = circle_img.filter(ImageFilter.GaussianBlur(radius=1))
+        circle_img.save(str(mask_path))
+    except ImportError:
+        cmd = [
+            FFMPEG_BIN, "-y", "-hide_banner", "-f", "lavfi", "-i",
+            f"color=c=white:s={size}x{size}:d=1,format=gray",
+            "-vf",
+            "geq=lum='if(lte(pow(X-W/2,2)+pow(Y-H/2,2),pow(min(W,H)/2,2)),255,0)'",
+            "-frames:v", "1",
+            str(mask_path),
+        ]
+        subprocess.run(cmd, capture_output=True, text=True)
+
+    return str(mask_path)
+
+def split_video(input_path, mode, output_dir, conversion="none", log_callback=None, process_callback=None, bitrate="100M", fps=None, height=None, width=None, out_codec="h265-main10-win-nvidia", input_path2=None, pack_scale=0.40, padding=0, hwaccel="auto"):
 
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -143,28 +234,26 @@ def split_video(input_path, mode, output_dir, conversion="none", log_callback=No
 
     dim_str = f":w={wi}:h={hi}" if wi > 0 and hi > 0 else ""
 
-    decoder_opts = []
-    if codec == 'h264':
-        decoder_opts = ["-hwaccel", "auto"]
-    elif codec == 'hevc':
-        decoder_opts = ["-hwaccel", "auto"]
+    filter_name = get_v360_filter_name()
+
+    decoder_opts = get_decoder_opts(codec, hwaccel)
 
     v360_filter = ""
     fisheye_suffix = ""
     if conversion == "to_fisheye":
-        v360_filter = f",v360=hequirect:fisheye{dim_str}"
+        v360_filter = f",{filter_name}=hequirect:fisheye{dim_str}"
         fisheye_suffix = "_FE180"
     elif conversion == "to_fisheye190":
-        v360_filter = f",v360=hequirect:fisheye:d_fov=190{dim_str}"
+        v360_filter = f",{filter_name}=hequirect:fisheye:d_fov=190{dim_str}"
         fisheye_suffix = "_FE190"
     elif conversion == "to_hequirect":
-        v360_filter = f",v360=fisheye:hequirect{dim_str}"
+        v360_filter = f",{filter_name}=fisheye:hequirect{dim_str}"
         fisheye_suffix = "_180"
     elif conversion == "heq_to_flat":
-        v360_filter = f",v360=hequirect:sg:v_fov=60:h_fov=60{dim_str}"
+        v360_filter = f",{filter_name}=hequirect:sg:v_fov=60:h_fov=60{dim_str}"
         fisheye_suffix = "_flat"
     elif conversion == "fish_to_flat":
-        v360_filter = f",v360=fisheye:sg:v_fov=60:h_fov=60{dim_str}"
+        v360_filter = f",{filter_name}=fisheye:sg:v_fov=60:h_fov=60{dim_str}"
         fisheye_suffix = "_flat"
 
     if mode == 'pack':
@@ -172,24 +261,28 @@ def split_video(input_path, mode, output_dir, conversion="none", log_callback=No
             raise ValueError("mode='pack' requires a valid input_path2 (mask SBS video)")
 
         codec2 = vcodec(input_path2)
-        decoder_opts2 = []
-        if codec2 in ('h264', 'hevc'):
-            decoder_opts2 = ["-hwaccel", "auto"]
+        decoder_opts2 = get_decoder_opts(codec2, hwaccel)
 
         eye_w = wi
         eye_h = hi
         sbs_w = eye_w * 2
 
-        target_w = int(eye_w * pack_scale)
-        target_h = int(eye_h * pack_scale)
-        h_half = target_h // 2
-        w_half = target_w // 2
-        x_mid = sbs_w // 2 - target_w // 2
+        overlay_size = int(eye_h * pack_scale) // 2 * 2
+        half_overlay = overlay_size // 2
+        x_mid = sbs_w // 2 - overlay_size // 2
 
         ov_y_top = padding
-        ov_y_bot = eye_h - padding - h_half
-        ov_x_right = sbs_w - padding - w_half
+        ov_y_bot = eye_h - padding - half_overlay
+        ov_x_right = sbs_w - padding - half_overlay
         ov_x_left = padding
+
+        circle_mask = get_circle_mask(overlay_size)
+
+        erosion_threshold = 32768 if eye_h <= 2400 else 65535
+        contrast = 2.0 if eye_h <= 2400 else 2.5
+        gamma = 1.2 if eye_h <= 2400 else 1.4
+        sigma = 1.8
+        clean_filter = f"erosion=threshold0={erosion_threshold}:coordinates=255,gblur=sigma={sigma},eq=contrast={contrast}:gamma={gamma}"
 
         parts = []
         parts.append(f"[0:v]fps={fps},setpts=N/({fps}*TB),split=2[b1][b2]")
@@ -197,37 +290,50 @@ def split_video(input_path, mode, output_dir, conversion="none", log_callback=No
         parts.append(f"[b2]crop=iw/2:ih:iw/2:0{v360_filter}[br]")
         parts.append(f"[bl][br]hstack[base]")
 
+        parts.append(f"[2:v]format=gray,split=2[circle_l][circle_r]")
+
         parts.append(f"[1:v]fps={fps},setpts=N/({fps}*TB),split=2[m1][m2]")
-        parts.append(f"[m1]crop=iw/2:ih:0:0{v360_filter},scale={target_w}:{target_h}:flags=bicubic,split=2[ml1][ml2]")
-        parts.append(f"[m2]crop=iw/2:ih:iw/2:0{v360_filter},scale={target_w}:{target_h}:flags=bicubic,split=4[mr1][mr2][mr3][mr4]")
+        parts.append(f"[m1]crop=iw/2:ih:0:0{v360_filter},scale={overlay_size}:{overlay_size}:flags=area,{clean_filter},format=gbrp[ml_rgb]")
+        parts.append(f"[ml_rgb][circle_l]alphamerge,format=rgba[left_circle]")
+        parts.append(f"[m2]crop=iw/2:ih:iw/2:0{v360_filter},scale={overlay_size}:{overlay_size}:flags=area,{clean_filter},format=gbrp[mr_rgb]")
+        parts.append(f"[mr_rgb][circle_r]alphamerge,format=rgba[right_circle]")
 
-        parts.append(f"[ml1]crop={target_w}:{h_half}:0:{h_half}[ml_bottom]")
-        parts.append(f"[ml2]crop={target_w}:{h_half}:0:0[ml_top]")
+        parts.append(f"[left_circle]split=2[left_for_top][left_for_bottom]")
+        parts.append(f"[left_for_top]crop={overlay_size}:{half_overlay}:0:0,format=yuva420p[left_top]")
+        parts.append(f"[left_for_bottom]crop={overlay_size}:{half_overlay}:0:{half_overlay},format=yuva420p[left_bottom]")
 
-        parts.append(f"[mr1]crop={w_half}:{h_half}:0:0[mr_tl]")
-        parts.append(f"[mr2]crop={w_half}:{h_half}:{w_half}:0[mr_tr]")
-        parts.append(f"[mr3]crop={w_half}:{h_half}:0:{h_half}[mr_bl]")
-        parts.append(f"[mr4]crop={w_half}:{h_half}:{w_half}:{h_half}[mr_br]")
+        parts.append(f"[right_circle]split=4[r1][r2][r3][r4]")
+        parts.append(f"[r1]crop={half_overlay}:{half_overlay}:0:0,format=yuva420p[right_tl]")
+        parts.append(f"[r2]crop={half_overlay}:{half_overlay}:{half_overlay}:0,format=yuva420p[right_tr]")
+        parts.append(f"[r3]crop={half_overlay}:{half_overlay}:0:{half_overlay},format=yuva420p[right_bl]")
+        parts.append(f"[r4]crop={half_overlay}:{half_overlay}:{half_overlay}:{half_overlay},format=yuva420p[right_br]")
 
-        parts.append(f"[base][ml_bottom]overlay={x_mid}:{ov_y_top}[o1]")
-        parts.append(f"[o1][ml_top]overlay={x_mid}:{ov_y_bot}[o2]")
-        parts.append(f"[o2][mr_bl]overlay={ov_x_right}:{ov_y_top}[o3]")
-        parts.append(f"[o3][mr_br]overlay={ov_x_left}:{ov_y_top}[o4]")
-        parts.append(f"[o4][mr_tl]overlay={ov_x_right}:{ov_y_bot}[o5]")
-        parts.append(f"[o5][mr_tr]overlay={ov_x_left}:{ov_y_bot},scale=w={width}:h={height}:flags=bicubic[packed]")
+        parts.append(f"[base][left_top]overlay={x_mid}:{ov_y_bot}[o1]")
+        parts.append(f"[o1][left_bottom]overlay={x_mid}:{ov_y_top}[o2]")
+        parts.append(f"[o2][right_tl]overlay={ov_x_right}:{ov_y_bot}[o3]")
+        parts.append(f"[o3][right_tr]overlay={ov_x_left}:{ov_y_bot}[o4]")
+        parts.append(f"[o4][right_bl]overlay={ov_x_right}:{ov_y_top}[o5]")
+        parts.append(f"[o5][right_br]overlay={ov_x_left}:{ov_y_top},scale=w={width}:h={height}:flags=bicubic[packed]")
 
         filter_complex = ";".join(parts)
-
         output_file = os.path.join(output_dir, f"{filename}_ALPHA{fisheye_suffix}{ext}")
 
-        cmd = ["ffmpeg", "-hide_banner", "-y"]
+        cmd = [FFMPEG_BIN, "-hide_banner", "-y"]
         cmd.extend(decoder_opts)
         cmd.extend(["-i", input_path])
         cmd.extend(decoder_opts2)
         cmd.extend(["-i", input_path2])
+      
+        try:
+            src_duration = video_duration(input_path)
+        except Exception:
+            src_duration = None
+        image_dur_args = ["-t", str(src_duration)] if src_duration else []
+        cmd.extend(["-loop", "1", *image_dur_args, "-i", circle_mask])
         cmd.extend(["-sws_flags", "bicubic+full_chroma_int+accurate_rnd+full_chroma_inp"])
         cmd.extend(["-filter_complex", filter_complex])
         cmd.extend(["-map", "[packed]", "-map", "0:a?"])
+        cmd.extend(["-shortest"])
         cmd.extend(get_codec_opts(out_codec, bitrate, include_audio=True))
         cmd.extend(["-movflags", "+faststart+write_colr+use_metadata_tags"])
         cmd.extend([output_file])
@@ -240,9 +346,9 @@ def split_video(input_path, mode, output_dir, conversion="none", log_callback=No
         output_left = os.path.join(output_dir, f"{filename}_L{fisheye_suffix}{ext}")
         output_right = os.path.join(output_dir, f"{filename}_R{fisheye_suffix}{ext}")
 
-        filter_complex = f"[0:v]fps={fps},setpts=N/({fps}*TB),split=2[v1][v2];[v1]crop=iw/2:iw/2:0:(ih-iw/2)/2{v360_filter},scale=w={width}:h={height}:flags=bicubic[left];[v2]crop=iw/2:iw/2:iw/2:(ih-iw/2)/2{v360_filter},scale=w={width}:h={height}:flags=bicubic[right]"
+        filter_complex = f"[0:v]fps={fps},setpts=N/({fps}*TB),split=2[v1][v2];[v1]crop=iw/2:ih:0:(ih-iw/2)/2{v360_filter},scale=w={width}:h={height}:flags=bicubic[left];[v2]crop=iw/2:ih:iw/2:(ih-iw/2)/2{v360_filter},scale=w={width}:h={height}:flags=bicubic[right]"
 
-        cmd = ["ffmpeg", "-hide_banner", "-y"]
+        cmd = [FFMPEG_BIN, "-hide_banner", "-y"]
         cmd.extend(decoder_opts)
         cmd.extend(["-i", input_path])
         cmd.extend(["-sws_flags", "bicubic+full_chroma_int+accurate_rnd+full_chroma_inp"])
@@ -266,7 +372,7 @@ def split_video(input_path, mode, output_dir, conversion="none", log_callback=No
 
         filter_complex = f"[0:v]fps={fps},setpts=N/({fps}*TB),split=2[v1][v2];[v1]crop=ih/2:ih/2:(iw-ih/2)/2:0{v360_filter},scale=w={width}:h={height}:flags=bicubic[top];[v2]crop=ih/2:ih/2:(iw-ih/2)/2:ih/2{v360_filter},scale=w={width}:h={height}:flags=bicubic[bottom]"
 
-        cmd = ["ffmpeg", "-hide_banner", "-y"]
+        cmd = [FFMPEG_BIN, "-hide_banner", "-y"]
         cmd.extend(decoder_opts)
         cmd.extend(["-i", input_path])
         cmd.extend(["-sws_flags", "bicubic+full_chroma_int+accurate_rnd+full_chroma_inp"])
@@ -316,7 +422,7 @@ def split_video(input_path, mode, output_dir, conversion="none", log_callback=No
         fps_filter = f"fps={fps}"
         audio_map = ["-c:a", "copy"]
         fps_opts = []
-        ffmpeg_bin = "ffmpeg"
+        ffmpeg_bin = FFMPEG_BIN
 
         if have(fps):
             filter_complex = f"[0:v]{crop_filter},{fps_filter},setpts=N/({fps}*TB),scale=w={width}:h={height}:flags=bicubic[v]"
@@ -339,7 +445,7 @@ def split_video(input_path, mode, output_dir, conversion="none", log_callback=No
 
     return True
 
-def combine_video(input_path_1, input_path_2, mode, output_path, conversion="none", log_callback=None, process_callback=None, bitrate="100M", mask_path=None, fps=None, height=None, width=None, out_codec="h265-main10-win-nvidia"):
+def combine_video(input_path_1, input_path_2, mode, output_path, conversion="none", log_callback=None, process_callback=None, bitrate="100M", mask_path=None, fps=None, height=None, width=None, out_codec="h265-main10-win-nvidia", hwaccel="auto"):
 
     if log_callback: log_callback(f"Combining {input_path_1} and {input_path_2} into {output_path} (Mode: {mode}, Conv: {conversion})")
 
@@ -355,34 +461,24 @@ def combine_video(input_path_1, input_path_2, mode, output_path, conversion="non
 
     dim_str = f":w={w_in}:h={h_in}" if w_in > 0 and h_in > 0 else ""
 
-    input_opts_1 = []
-    if codec1 in ('h264', 'hevc'):
-        input_opts_1 = ["-hwaccel", "auto"]
+    filter_name = get_v360_filter_name()
+
+    input_opts_1 = get_decoder_opts(codec1, hwaccel)
 
     codec2 = vcodec(input_path_2)
-    input_opts_2 = []
-    if codec2 in ('h264', 'hevc'):
-        input_opts_2 = ["-hwaccel", "auto"]
-
-    cmd = ["ffmpeg", "-hide_banner", "-y"]
-    cmd.extend(input_opts_1)
-    cmd.extend(["-i", input_path_1])
-    if mask_path is not None:
-        cmd.extend(["-i", mask_path])
-    cmd.extend(input_opts_2)
-    cmd.extend(["-i", input_path_2])
+    input_opts_2 = get_decoder_opts(codec2, hwaccel)
 
     v360_filter = ""
     if conversion == "to_fisheye":
-        v360_filter = f"v360=hequirect:fisheye{dim_str},"
+        v360_filter = f"{filter_name}=hequirect:fisheye{dim_str},"
     elif conversion == "to_fisheye190":
-        v360_filter = f"v360=hequirect:fisheye:d_fov=190{dim_str},"
+        v360_filter = f"{filter_name}=hequirect:fisheye:d_fov=190{dim_str},"
     elif conversion == "to_hequirect":
-        v360_filter = f"v360=fisheye:hequirect{dim_str},"
+        v360_filter = f"{filter_name}=fisheye:hequirect{dim_str},"
     elif conversion == "heq_to_flat":
-        v360_filter = f"v360=hequirect:sg:v_fov=60:h_fov=60{dim_str},"
+        v360_filter = f"{filter_name}=hequirect:sg:v_fov=60:h_fov=60{dim_str},"
     elif conversion == "fish_to_flat":
-        v360_filter = f"v360=fisheye:sg:v_fov=60:h_fov=60{dim_str},"
+        v360_filter = f"{filter_name}=fisheye:sg:v_fov=60:h_fov=60{dim_str},"
 
     if mask_path is not None:
         idx2 = 2
@@ -399,7 +495,7 @@ def combine_video(input_path_1, input_path_2, mode, output_path, conversion="non
     fps_filter = f"fps={fps}"
     audio_map = ["-c:a", "copy"]
     fps_opts = []
-    ffmpeg_bin = "ffmpeg"
+    ffmpeg_bin = FFMPEG_BIN
 
     if have(fps):
         if mask_path is not None:
@@ -434,16 +530,19 @@ def combine_video(input_path_1, input_path_2, mode, output_path, conversion="non
     run_process(cmd, log_callback, process_callback)
     return True
 
-def tb_to_sbs(input_path, output_path, conversion="none", log_callback=None, process_callback=None, bitrate="100M", operation_mode="custom_tb_to_sbs", mask_path=None, fps=None, height=None, width=None, out_codec="h265-main10-win-nvidia"):
+def tb_to_sbs(input_path, output_path, conversion="none", log_callback=None, process_callback=None, bitrate="100M", operation_mode="custom_tb_to_sbs", mask_path=None, fps=None, height=None, width=None, out_codec="h265-main10-win-nvidia", hwaccel="auto"):
     if log_callback: log_callback(f"Converting video for {input_path} (conv={conversion}, op={operation_mode})")
 
     fps = frame_rate(input_path) if not have(fps) else fps
     codec = vcodec(input_path)
     w_in, h_in = vresolution(input_path)
     wi, hi = w_in, h_in
+
     if operation_mode == "sbs_to_sbs":
         wi = w_in // 2 if w_in > 0 else 0
+
     elif operation_mode in ("tb_to_tb", "tb_to_sbs"):
+
         wi = w_in // 2 if w_in > 0 else 0
         hi = h_in // 2 if h_in > 0 else 0
     elif operation_mode == "sbs_to_tb":
@@ -457,13 +556,11 @@ def tb_to_sbs(input_path, output_path, conversion="none", log_callback=None, pro
 
     dim_str = f":w={wi}:h={hi}" if wi > 0 and hi > 0 else ""
 
-    decoder_opts = []
-    if codec == 'h264':
-        decoder_opts = ["-hwaccel", "auto"]
-    elif codec == 'hevc':
-        decoder_opts = ["-hwaccel", "auto"]
+    filter_name = get_v360_filter_name()
 
-    ffmpeg_bin = "ffmpeg"
+    decoder_opts = get_decoder_opts(codec, hwaccel)
+
+    ffmpeg_bin = FFMPEG_BIN
     cmd = [ffmpeg_bin, "-hide_banner", "-y"]
     cmd.extend(decoder_opts)
     cmd.extend(["-i", input_path])
@@ -472,15 +569,15 @@ def tb_to_sbs(input_path, output_path, conversion="none", log_callback=None, pro
 
     v360_filter = ""
     if conversion == "to_fisheye":
-        v360_filter = f",v360=hequirect:fisheye{dim_str}"
+        v360_filter = f",{filter_name}=hequirect:fisheye{dim_str}"
     elif conversion == "to_fisheye190":
-        v360_filter = f",v360=hequirect:fisheye:d_fov=190{dim_str}"
+        v360_filter = f",{filter_name}=hequirect:fisheye:d_fov=190{dim_str}"
     elif conversion == "to_hequirect":
-        v360_filter = f",v360=fisheye:hequirect{dim_str}"
+        v360_filter = f",{filter_name}=fisheye:hequirect{dim_str}"
     elif conversion == "heq_to_flat":
-        v360_filter = f",v360=hequirect:sg:v_fov=60:h_fov=60{dim_str}"
+        v360_filter = f",{filter_name}=hequirect:sg:v_fov=60:h_fov=60{dim_str}"
     elif conversion == "fish_to_flat":
-        v360_filter = f",v360=fisheye:sg:v_fov=60:h_fov=60{dim_str}"
+        v360_filter = f",{filter_name}=fisheye:sg:v_fov=60:h_fov=60{dim_str}"
 
     base_filter = ""
     if operation_mode == "sbs_to_sbs":
@@ -541,7 +638,7 @@ def tb_to_sbs(input_path, output_path, conversion="none", log_callback=None, pro
     run_process(cmd, log_callback, process_callback)
     return True
 
-def batch_tb_to_sbs(input_dir, output_dir=None, conversion="none", log_callback=None, process_callback=None, bitrate="100M", operation_mode="custom_tb_to_sbs", mask_path=None, fps=None, height=None, width=None, out_codec="h265-main10-win-nvidia"):
+def batch_tb_to_sbs(input_dir, output_dir=None, conversion="none", log_callback=None, process_callback=None, bitrate="100M", operation_mode="custom_tb_to_sbs", mask_path=None, fps=None, height=None, width=None, out_codec="h265-main10-win-nvidia", hwaccel="auto"):
 
     width = 'iw' if not have(width) else width
     height = 'ih' if not have(height) else height
@@ -583,7 +680,9 @@ def batch_tb_to_sbs(input_dir, output_dir=None, conversion="none", log_callback=
             if log_callback: log_callback(f"Skipping {os.path.basename(input_path)}, output {os.path.basename(output_path)} already exists.")
             continue
 
-        tb_to_sbs(input_path, output_path, conversion=conversion, log_callback=log_callback, process_callback=process_callback, bitrate=bitrate, operation_mode=operation_mode, mask_path=mask_path, fps=fps, height=height, width=width, out_codec=out_codec)
+        tb_to_sbs(input_path, output_path, conversion=conversion, log_callback=log_callback, process_callback=process_callback, bitrate=bitrate, operation_mode=operation_mode, mask_path=mask_path, fps=fps, height=height, width=width, out_codec=out_codec, hwaccel=hwaccel)
+
+        get_video_info.cache_clear()
 
     if log_callback: log_callback("Batch conversion finished.")
     return True
@@ -773,6 +872,9 @@ class VRSplitCombineApp:
 
         frame_params = ttk.Frame(self.tab_split)
         frame_params.pack(fill='x', pady=5)
+        self.split_hwaccel_var = tk.StringVar(value=DEFAULT_HWACCEL_LABEL)
+        ttk.Label(frame_params, text="Decoder Acceleration:").pack(side='left', padx=(10, 0))
+        ttk.OptionMenu(frame_params, self.split_hwaccel_var, DEFAULT_HWACCEL_LABEL, *HWACCEL_UI_LABELS.keys()).pack(side='left', padx=5)
         ttk.Label(frame_params, text="FPS (Optional):").pack(side='left')
         self.split_fps_var = tk.StringVar()
         ttk.Entry(frame_params, textvariable=self.split_fps_var, width=8).pack(side='left', padx=5)
@@ -862,6 +964,9 @@ class VRSplitCombineApp:
 
         frame_params = ttk.Frame(self.tab_combine)
         frame_params.pack(fill='x', pady=5)
+        self.combine_hwaccel_var = tk.StringVar(value=DEFAULT_HWACCEL_LABEL)
+        ttk.Label(frame_params, text="Decoder Acceleration:").pack(side='left', padx=(10, 0))
+        ttk.OptionMenu(frame_params, self.combine_hwaccel_var, DEFAULT_HWACCEL_LABEL, *HWACCEL_UI_LABELS.keys()).pack(side='left', padx=5)
         ttk.Label(frame_params, text="FPS (Optional):").pack(side='left')
         self.combine_fps_var = tk.StringVar()
         ttk.Entry(frame_params, textvariable=self.combine_fps_var, width=8).pack(side='left', padx=5)
@@ -931,6 +1036,9 @@ class VRSplitCombineApp:
 
         frame_params = ttk.Frame(self.tab_convert)
         frame_params.pack(fill='x', pady=5)
+        self.convert_hwaccel_var = tk.StringVar(value=DEFAULT_HWACCEL_LABEL)
+        ttk.Label(frame_params, text="Decoder Acceleration:").pack(side='left', padx=(10, 0))
+        ttk.OptionMenu(frame_params, self.convert_hwaccel_var, DEFAULT_HWACCEL_LABEL, *HWACCEL_UI_LABELS.keys()).pack(side='left', padx=5)
         ttk.Label(frame_params, text="FPS (Optional):").pack(side='left')
         self.convert_fps_var = tk.StringVar()
         ttk.Entry(frame_params, textvariable=self.convert_fps_var, width=8).pack(side='left', padx=5)
@@ -1014,7 +1122,8 @@ class VRSplitCombineApp:
                 out_codec=self.split_codec_var.get(),
                 input_path2=mask_val if mask_val and os.path.exists(mask_val) else None,
                 pack_scale=pack_scale_val,
-                padding=padding_val
+                padding=padding_val,
+                hwaccel=HWACCEL_UI_LABELS.get(self.split_hwaccel_var.get(), "auto")
             )
             self.log(get_text('msg_task_complete'))
             messagebox.showinfo(get_text('title_success'), get_text('msg_success_split'))
@@ -1074,7 +1183,8 @@ class VRSplitCombineApp:
                 fps=self.combine_fps_var.get(),
                 width=self.combine_width_var.get(),
                 height=self.combine_height_var.get(),
-                out_codec=self.combine_codec_var.get()
+                out_codec=self.combine_codec_var.get(),
+                hwaccel=HWACCEL_UI_LABELS.get(self.combine_hwaccel_var.get(), "auto")
             )
             self.log(get_text('msg_task_complete'))
             messagebox.showinfo(get_text('title_success'), get_text('msg_success_combine'))
@@ -1121,7 +1231,8 @@ class VRSplitCombineApp:
                     fps=self.convert_fps_var.get(),
                     width=self.convert_width_var.get(),
                     height=self.convert_height_var.get(),
-                    out_codec=self.convert_codec_var.get()
+                    out_codec=self.convert_codec_var.get(),
+                    hwaccel=HWACCEL_UI_LABELS.get(self.convert_hwaccel_var.get(), "auto")
                 )
             else:
                 out_file = out_path
@@ -1158,7 +1269,8 @@ class VRSplitCombineApp:
                     fps=self.convert_fps_var.get(),
                     width=self.convert_width_var.get(),
                     height=self.convert_height_var.get(),
-                    out_codec=self.convert_codec_var.get()
+                    out_codec=self.convert_codec_var.get(),
+                    hwaccel=HWACCEL_UI_LABELS.get(self.convert_hwaccel_var.get(), "auto")
                 )
             self.log(get_text('msg_task_complete'))
             messagebox.showinfo(get_text('title_success'), "Conversion completed!")
