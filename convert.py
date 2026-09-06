@@ -3,6 +3,7 @@ from tkinter import ttk, filedialog, messagebox
 import os, threading, subprocess, json, functools, shutil, tempfile
 from pathlib import Path
 
+
 FFMPEG_BIN = shutil.which('ffmpeg') or 'ffmpeg'
 FFPROBE_BIN = shutil.which('ffprobe') or 'ffprobe'
 
