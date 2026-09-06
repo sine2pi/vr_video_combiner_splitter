@@ -4,6 +4,7 @@
 <img width="500" height="800" alt="Screenshot 2026-06-21 162401" src="https://github.com/user-attachments/assets/cd511489-5ece-4b23-9858-f06b7de71c3a" />
 <img width="500" height="800" alt="Screenshot 2026-06-21 162334" src="https://github.com/user-attachments/assets/9189bf7b-3eae-4fe1-a323-77efbb2035ca" />
 
+Combined fisheye conversion with alpha pack option. If you have a equirectangular sbs video and have a matte/mask and want to use alpha packing for deovr now you can convert to fisheye optionally all in one go. 
 
 Added alphapacking overlay option. removed interpolation. Now just a pure ffmpeg tool.
 
