@@ -16,34 +16,54 @@ def aorb(a, b):
 def aborc(a, b, c):
     return aorb(a, b) if not have(c) else c
 
+# Performance Optimization: Cache video metadata extraction using normalized absolute paths
 @functools.lru_cache(maxsize=128)
-def get_video_info(file_path):
+def _get_video_info_cached(norm_file_path):
+    # Single ffprobe call retrieving both video stream parameters and format duration
     cmd = [
         FFPROBE_BIN,
         '-v', 'error',
         '-select_streams', 'v:0',
-        '-show_entries', 'stream=width,height,codec_name,r_frame_rate',
+        '-show_entries', 'stream=width,height,codec_name,r_frame_rate:format=duration',
         '-of', 'json',
-        file_path
+        norm_file_path
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, check=True)
     info = json.loads(result.stdout)
     if 'streams' not in info or not info['streams']:
-        raise ValueError(f"No video streams found in {file_path}")
+        raise ValueError(f"No video streams found in {norm_file_path}")
     stream = info['streams'][0]
     fps_str = stream.get('r_frame_rate', '30/1')
-    num, denom = map(int, fps_str.split('/'))
-    fps = num / denom if denom != 0 else 30.0
+    if '/' in fps_str:
+        num, denom = map(int, fps_str.split('/'))
+        fps = num / denom if denom != 0 else 30.0
+    else:
+        fps = float(fps_str) if fps_str else 30.0
     codec = stream.get('codec_name', '')
     width = int(stream.get('width', 0))
     height = int(stream.get('height', 0))
+
+    duration = 0.0
+    if 'format' in info and 'duration' in info['format']:
+        try:
+            duration = float(info['format']['duration'])
+        except (ValueError, TypeError):
+            pass
 
     return {
         'fps': fps,
         'codec': codec,
         'width': width,
-        'height': height
+        'height': height,
+        'duration': duration
     }
+
+def get_video_info(file_path):
+    # Normalize path so relative/absolute paths map to the same LRU cache entry
+    norm_path = os.path.abspath(os.path.normpath(file_path))
+    return _get_video_info_cached(norm_path)
+
+get_video_info.cache_clear = _get_video_info_cached.cache_clear
 
 def frame_rate(file_path):
     return get_video_info(file_path)['fps']
@@ -56,6 +76,10 @@ def vresolution(file_path):
     return info['width'], info['height']
 
 def video_duration(file_path):
+    # Performance Optimization: Query consolidated cached metadata instead of spawning ffprobe again
+    info = get_video_info(file_path)
+    if info.get('duration', 0.0) > 0:
+        return info['duration']
     cmd = [
         FFPROBE_BIN, '-v', 'error',
         '-show_entries', 'format=duration',
@@ -108,6 +132,8 @@ HWACCEL_UI_LABELS = {
 }
 DEFAULT_HWACCEL_LABEL = "Auto"
 
+# Performance Optimization: Cache encoder feature check to avoid redundant subprocess calls
+@functools.lru_cache(maxsize=32)
 def _ffmpeg_has_encoder(encoder_name):
     try:
         result = subprocess.run([FFMPEG_BIN, '-hide_banner', '-encoders'], capture_output=True, text=True, check=False)
@@ -116,6 +142,8 @@ def _ffmpeg_has_encoder(encoder_name):
     output = (result.stdout or '') + (result.stderr or '')
     return encoder_name in output
 
+# Performance Optimization: Cache filter feature check to avoid redundant subprocess calls
+@functools.lru_cache(maxsize=32)
 def _ffmpeg_has_filter(filter_name):
     try:
         result = subprocess.run([FFMPEG_BIN, '-hide_banner', '-filters'], capture_output=True, text=True, check=False)
