@@ -3,7 +3,6 @@ from tkinter import ttk, filedialog, messagebox
 import os, threading, subprocess, json, functools, shutil, tempfile
 from pathlib import Path
 
-
 FFMPEG_BIN = shutil.which('ffmpeg') or 'ffmpeg'
 FFPROBE_BIN = shutil.which('ffprobe') or 'ffprobe'
 
@@ -245,7 +244,7 @@ def split_video(input_path, mode, output_dir, conversion="none", log_callback=No
         v360_filter = f",{filter_name}=hequirect:fisheye{dim_str}"
         fisheye_suffix = "_FE180"
     elif conversion == "to_fisheye190":
-        v360_filter = f",{filter_name}=hequirect:fisheye:d_fov=190{dim_str}"
+        v360_filter = f",{filter_name}=input=hequirect:ih_fov=180:iv_fov=180:output=fisheye:h_fov=190:v_fov=190{dim_str}"
         fisheye_suffix = "_FE190"
     elif conversion == "to_hequirect":
         v360_filter = f",{filter_name}=fisheye:hequirect{dim_str}"
@@ -329,6 +328,7 @@ def split_video(input_path, mode, output_dir, conversion="none", log_callback=No
             src_duration = video_duration(input_path)
         except Exception:
             src_duration = None
+            
         image_dur_args = ["-t", str(src_duration)] if src_duration else []
         cmd.extend(["-loop", "1", *image_dur_args, "-i", circle_mask])
         cmd.extend(["-sws_flags", "bicubic+full_chroma_int+accurate_rnd+full_chroma_inp"])
@@ -368,6 +368,7 @@ def split_video(input_path, mode, output_dir, conversion="none", log_callback=No
         run_process(cmd, log_callback, process_callback)
 
     elif mode == 'top_and_bottom':
+
         output_top = os.path.join(output_dir, f"{filename}_T{fisheye_suffix}{ext}")
         output_bottom = os.path.join(output_dir, f"{filename}_B{fisheye_suffix}{ext}")
 
@@ -454,18 +455,16 @@ def combine_video(input_path_1, input_path_2, mode, output_path, conversion="non
     codec1 = vcodec(input_path_1)
     w_in, h_in = vresolution(input_path_1)
 
-    # out_w = w_in * 2 if mode == "left_right" else w_in
-    # out_h = h_in * 2 if mode == "top_bottom" else h_in
+    w_in = w_in * 2 if mode == "left_right" else w_in
+    h_in = h_in * 2 if mode == "top_bottom" else h_in
 
-    width = 'iw' if not have(width) else width
-    height = 'ih' if not have(height) else height
+    width = "iw" if not have(width) else width
+    height = "ih" if not have(height) else height
 
-    dim_str = f":w={w_in}:h={h_in}" if w_in > 0 and h_in > 0 else ""
+    dim_str = f":w={wi}:h={hi}" if wi > 0 and hi > 0 else ""
 
     filter_name = get_v360_filter_name()
-
     input_opts_1 = get_decoder_opts(codec1, hwaccel)
-
     codec2 = vcodec(input_path_2)
     input_opts_2 = get_decoder_opts(codec2, hwaccel)
 
@@ -473,7 +472,7 @@ def combine_video(input_path_1, input_path_2, mode, output_path, conversion="non
     if conversion == "to_fisheye":
         v360_filter = f"{filter_name}=hequirect:fisheye{dim_str},"
     elif conversion == "to_fisheye190":
-        v360_filter = f"{filter_name}=hequirect:fisheye:d_fov=190{dim_str},"
+        v360_filter = f"{filter_name}=input=hequirect:ih_fov=180:iv_fov=180:output=fisheye:h_fov=190:v_fov=190{dim_str},"
     elif conversion == "to_hequirect":
         v360_filter = f"{filter_name}=fisheye:hequirect{dim_str},"
     elif conversion == "heq_to_flat":
@@ -541,9 +540,7 @@ def tb_to_sbs(input_path, output_path, conversion="none", log_callback=None, pro
 
     if operation_mode == "sbs_to_sbs":
         wi = w_in // 2 if w_in > 0 else 0
-
     elif operation_mode in ("tb_to_tb", "tb_to_sbs"):
-
         wi = w_in // 2 if w_in > 0 else 0
         hi = h_in // 2 if h_in > 0 else 0
     elif operation_mode == "sbs_to_tb":
@@ -558,7 +555,6 @@ def tb_to_sbs(input_path, output_path, conversion="none", log_callback=None, pro
     dim_str = f":w={wi}:h={hi}" if wi > 0 and hi > 0 else ""
 
     filter_name = get_v360_filter_name()
-
     decoder_opts = get_decoder_opts(codec, hwaccel)
 
     ffmpeg_bin = FFMPEG_BIN
@@ -572,7 +568,7 @@ def tb_to_sbs(input_path, output_path, conversion="none", log_callback=None, pro
     if conversion == "to_fisheye":
         v360_filter = f",{filter_name}=hequirect:fisheye{dim_str}"
     elif conversion == "to_fisheye190":
-        v360_filter = f",{filter_name}=hequirect:fisheye:d_fov=190{dim_str}"
+        v360_filter = f",{filter_name}=input=hequirect:ih_fov=180:iv_fov=180:output=fisheye:h_fov=190:v_fov=190{dim_str}"
     elif conversion == "to_hequirect":
         v360_filter = f",{filter_name}=fisheye:hequirect{dim_str}"
     elif conversion == "heq_to_flat":
@@ -631,11 +627,9 @@ def tb_to_sbs(input_path, output_path, conversion="none", log_callback=None, pro
 
     cmd.extend(get_codec_opts(out_codec, bitrate, include_audio=False))
     cmd.extend(["-movflags", "+faststart"])
-
     cmd.extend(["-color_range", "pc", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"])
 
     cmd.extend([output_path])
-
     run_process(cmd, log_callback, process_callback)
     return True
 
@@ -686,6 +680,108 @@ def batch_tb_to_sbs(input_dir, output_dir=None, conversion="none", log_callback=
         get_video_info.cache_clear()
 
     if log_callback: log_callback("Batch conversion finished.")
+    return True
+
+VIDEO_EXTENSIONS = ('.mp4', '.mkv', '.mov', '.avi', '.webm')
+
+def find_video_files(input_dir, exclude_substrings=None):
+    import glob
+    files = []
+    for ext in VIDEO_EXTENSIONS:
+        files.extend(glob.glob(os.path.join(input_dir, f"*{ext}")))
+    exclude_substrings = exclude_substrings or []
+    files = [f for f in files if not any(s in os.path.basename(f) for s in exclude_substrings)]
+    return sorted(files)
+
+def find_mask_for_video(video_path, mask_dir):
+    base = os.path.splitext(os.path.basename(video_path))[0]
+    for ext in VIDEO_EXTENSIONS:
+        candidate = os.path.join(mask_dir, f"{base}_mask{ext}")
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+def batch_split_video(input_dir, mode, output_dir, mask_dir=None, conversion="none", log_callback=None, process_callback=None, bitrate="100M", fps=None, height=None, width=None, out_codec="h265-main10-win-nvidia", pack_scale=0.40, padding=0, hwaccel="auto"):
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    video_files = find_video_files(input_dir, exclude_substrings=["_mask"])
+    if not video_files:
+        if log_callback: log_callback(f"No video files found in {input_dir}")
+        return False
+
+    if log_callback: log_callback(f"Starting batch split in {input_dir} ({len(video_files)} file(s))")
+
+    for input_path in video_files:
+        mask_path = None
+        if mode == 'pack':
+            mask_path = find_mask_for_video(input_path, mask_dir) if mask_dir else None
+            if not mask_path:
+                base = os.path.splitext(os.path.basename(input_path))[0]
+                if log_callback: log_callback(f"Skipping {os.path.basename(input_path)}: no matching mask found (expected '{base}_mask.*' in {mask_dir}).")
+                continue
+
+        if log_callback: log_callback(f"Processing {os.path.basename(input_path)}...")
+        try:
+            split_video(
+                input_path, mode, output_dir,
+                conversion=conversion, log_callback=log_callback, process_callback=process_callback,
+                bitrate=bitrate, fps=fps, height=height, width=width, out_codec=out_codec,
+                input_path2=mask_path, pack_scale=pack_scale, padding=padding, hwaccel=hwaccel
+            )
+        except Exception as e:
+            if log_callback: log_callback(f"Error processing {os.path.basename(input_path)}: {e}")
+
+        get_video_info.cache_clear()
+
+    if log_callback: log_callback("Batch split finished.")
+    return True
+
+def batch_combine_video(input_dir1, input_dir2, mode, output_dir, conversion="none", log_callback=None, process_callback=None, bitrate="100M", mask_path=None, fps=None, height=None, width=None, out_codec="h265-main10-win-nvidia", hwaccel="auto"):
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    video_files_1 = find_video_files(input_dir1)
+    if not video_files_1:
+        if log_callback: log_callback(f"No video files found in {input_dir1}")
+        return False
+
+    ext_out = get_ext_from_codec(out_codec, ".mp4")
+
+    if log_callback: log_callback(f"Starting batch combine ({len(video_files_1)} file(s)) from {input_dir1} + {input_dir2}")
+
+    for in1 in video_files_1:
+        filename = os.path.splitext(os.path.basename(in1))[0]
+        in2 = None
+        for ext in VIDEO_EXTENSIONS:
+            candidate = os.path.join(input_dir2, f"{filename}{ext}")
+            if os.path.exists(candidate):
+                in2 = candidate
+                break
+        if not in2:
+            if log_callback: log_callback(f"Skipping {filename}: no matching file found in {input_dir2}.")
+            continue
+
+        suffix = "_LR" if mode == "left_right" else "_TB"
+        output_path = os.path.join(output_dir, f"{filename}{suffix}{ext_out}")
+        if os.path.exists(output_path):
+            if log_callback: log_callback(f"Skipping {filename}, output {os.path.basename(output_path)} already exists.")
+            continue
+
+        if log_callback: log_callback(f"Combining {filename}...")
+        try:
+            combine_video(
+                in1, in2, mode, output_path,
+                conversion=conversion, log_callback=log_callback, process_callback=process_callback,
+                bitrate=bitrate, mask_path=mask_path, fps=fps, height=height, width=width,
+                out_codec=out_codec, hwaccel=hwaccel
+            )
+        except Exception as e:
+            if log_callback: log_callback(f"Error combining {filename}: {e}")
+
+        get_video_info.cache_clear()
+
+    if log_callback: log_callback("Batch combine finished.")
     return True
 
 LANG = 'en'
@@ -814,17 +910,20 @@ class VRSplitCombineApp:
     def setup_split_tab(self):
         frame_input = ttk.Frame(self.tab_split)
         frame_input.pack(fill='x', pady=5)
-        ttk.Label(frame_input, text=get_text('lbl_input_video')).pack(side='left')
+        ttk.Label(frame_input, text="Input Video or Folder:").pack(side='left')
         self.split_input_var = tk.StringVar()
         ttk.Entry(frame_input, textvariable=self.split_input_var).pack(side='left', fill='x', expand=True, padx=5)
-        ttk.Button(frame_input, text=get_text('btn_browse'), command=lambda: self.browse_file(self.split_input_var)).pack(side='left')
+        ttk.Button(frame_input, text="Browse File...", command=lambda: self.browse_file(self.split_input_var)).pack(side='left', padx=2)
+        ttk.Button(frame_input, text="Browse Dir...", command=lambda: self.browse_dir(self.split_input_var)).pack(side='left', padx=2)
 
         frame_mask = ttk.Frame(self.tab_split)
         frame_mask.pack(fill='x', pady=5)
         ttk.Label(frame_mask, text=get_text('lbl_mask_video')).pack(side='left')
         self.split_mask_var = tk.StringVar()
         ttk.Entry(frame_mask, textvariable=self.split_mask_var).pack(side='left', fill='x', expand=True, padx=5)
-        ttk.Button(frame_mask, text=get_text('btn_browse'), command=lambda: self.browse_file(self.split_mask_var)).pack(side='left')
+        ttk.Button(frame_mask, text="Browse File...", command=lambda: self.browse_file(self.split_mask_var)).pack(side='left', padx=2)
+        ttk.Button(frame_mask, text="Browse Dir...", command=lambda: self.browse_dir(self.split_mask_var)).pack(side='left', padx=2)
+        ttk.Label(self.tab_split, text="For Pack batch mode: select a folder of videos above and a matching folder of mask videos here (mask files must be named '<video_name>_mask.<ext>').", foreground="gray", wraplength=700, justify='left').pack(fill='x', pady=(0, 5))
 
         frame_output = ttk.Frame(self.tab_split)
         frame_output.pack(fill='x', pady=5)
@@ -911,17 +1010,20 @@ class VRSplitCombineApp:
     def setup_combine_tab(self):
         frame_in1 = ttk.Frame(self.tab_combine)
         frame_in1.pack(fill='x', pady=5)
-        ttk.Label(frame_in1, text=get_text('lbl_input_1')).pack(side='left')
+        ttk.Label(frame_in1, text="Input File/Folder 1 (Left/Top):").pack(side='left')
         self.combine_in1_var = tk.StringVar()
         ttk.Entry(frame_in1, textvariable=self.combine_in1_var).pack(side='left', fill='x', expand=True, padx=5)
-        ttk.Button(frame_in1, text=get_text('btn_browse'), command=lambda: self.browse_file(self.combine_in1_var)).pack(side='left')
+        ttk.Button(frame_in1, text="Browse File...", command=lambda: self.browse_file(self.combine_in1_var)).pack(side='left', padx=2)
+        ttk.Button(frame_in1, text="Browse Dir...", command=lambda: self.browse_dir(self.combine_in1_var)).pack(side='left', padx=2)
 
         frame_in2 = ttk.Frame(self.tab_combine)
         frame_in2.pack(fill='x', pady=5)
-        ttk.Label(frame_in2, text=get_text('lbl_input_2')).pack(side='left')
+        ttk.Label(frame_in2, text="Input File/Folder 2 (Right/Bottom):").pack(side='left')
         self.combine_in2_var = tk.StringVar()
         ttk.Entry(frame_in2, textvariable=self.combine_in2_var).pack(side='left', fill='x', expand=True, padx=5)
-        ttk.Button(frame_in2, text=get_text('btn_browse'), command=lambda: self.browse_file(self.combine_in2_var)).pack(side='left')
+        ttk.Button(frame_in2, text="Browse File...", command=lambda: self.browse_file(self.combine_in2_var)).pack(side='left', padx=2)
+        ttk.Button(frame_in2, text="Browse Dir...", command=lambda: self.browse_dir(self.combine_in2_var)).pack(side='left', padx=2)
+        ttk.Label(self.tab_combine, text="For batch mode: select a folder for Input 1 and Input 2 (matched by identical filename) and a folder for Output.", foreground="gray", wraplength=700, justify='left').pack(fill='x', pady=(0, 5))
 
         frame_mask = ttk.Frame(self.tab_combine)
         frame_mask.pack(fill='x', pady=5)
@@ -932,10 +1034,11 @@ class VRSplitCombineApp:
 
         frame_out = ttk.Frame(self.tab_combine)
         frame_out.pack(fill='x', pady=5)
-        ttk.Label(frame_out, text=get_text('lbl_output_file')).pack(side='left')
+        ttk.Label(frame_out, text="Output File/Folder (Optional):").pack(side='left')
         self.combine_out_var = tk.StringVar()
         ttk.Entry(frame_out, textvariable=self.combine_out_var).pack(side='left', fill='x', expand=True, padx=5)
-        ttk.Button(frame_out, text=get_text('btn_save'), command=lambda: self.save_file(self.combine_out_var)).pack(side='left')
+        ttk.Button(frame_out, text=get_text('btn_save'), command=lambda: self.save_file(self.combine_out_var)).pack(side='left', padx=2)
+        ttk.Button(frame_out, text="Browse Dir...", command=lambda: self.browse_dir(self.combine_out_var)).pack(side='left', padx=2)
 
         frame_mode = ttk.LabelFrame(self.tab_combine, text=get_text('grp_combine_mode'), padding=10)
         frame_mode.pack(fill='x', pady=10)
@@ -1093,12 +1196,28 @@ class VRSplitCombineApp:
         input_path = self.split_input_var.get()
         output_dir = self.split_output_var.get()
         mode = self.split_mode_var.get()
+        mask_val = self.split_mask_var.get()
 
         if not input_path or not os.path.exists(input_path):
             messagebox.showerror(get_text('title_error'), get_text('msg_error_input_file'))
             return
+
+        is_batch = os.path.isdir(input_path)
+
+        if is_batch and not output_dir:
+            messagebox.showerror(get_text('title_error'), "Please select an Output Dir for batch (folder) processing.")
+            return
         if not output_dir:
             output_dir = os.path.dirname(input_path)
+
+        if mode == 'pack':
+            if is_batch:
+                if not mask_val or not os.path.isdir(mask_val):
+                    messagebox.showerror(get_text('title_error'), "Pack mode with a folder Input Video requires a Mask Video folder (containing matching '<video_name>_mask' files).")
+                    return
+            elif not mask_val or not os.path.exists(mask_val):
+                messagebox.showerror(get_text('title_error'), "Pack mode requires a Mask Video.")
+                return
 
         self.log(get_text('msg_starting_split').format(mode))
 
@@ -1106,26 +1225,44 @@ class VRSplitCombineApp:
         self.btn_split_stop.config(state='normal')
 
         def task():
-            mask_val = self.split_mask_var.get()
             pack_scale_val = float(self.split_pack_scale_var.get()) if self.split_pack_scale_var.get() else 0.40
             padding_val = int(self.split_padding_var.get()) if self.split_padding_var.get() else 0
-            split_video(
-                input_path,
-                mode,
-                output_dir,
-                conversion=self.split_conv_var.get(),
-                log_callback=self.log,
-                process_callback=lambda p: setattr(self, 'proc_split', p),
-                bitrate=self.split_bitrate_var.get(),
-                fps=self.split_fps_var.get(),
-                width=self.split_width_var.get(),
-                height=self.split_height_var.get(),
-                out_codec=self.split_codec_var.get(),
-                input_path2=mask_val if mask_val and os.path.exists(mask_val) else None,
-                pack_scale=pack_scale_val,
-                padding=padding_val,
-                hwaccel=HWACCEL_UI_LABELS.get(self.split_hwaccel_var.get(), "auto")
-            )
+            if is_batch:
+                batch_split_video(
+                    input_path,
+                    mode,
+                    output_dir,
+                    mask_dir=mask_val if mask_val and os.path.isdir(mask_val) else None,
+                    conversion=self.split_conv_var.get(),
+                    log_callback=self.log,
+                    process_callback=lambda p: setattr(self, 'proc_split', p),
+                    bitrate=self.split_bitrate_var.get(),
+                    fps=self.split_fps_var.get(),
+                    width=self.split_width_var.get(),
+                    height=self.split_height_var.get(),
+                    out_codec=self.split_codec_var.get(),
+                    pack_scale=pack_scale_val,
+                    padding=padding_val,
+                    hwaccel=HWACCEL_UI_LABELS.get(self.split_hwaccel_var.get(), "auto")
+                )
+            else:
+                split_video(
+                    input_path,
+                    mode,
+                    output_dir,
+                    conversion=self.split_conv_var.get(),
+                    log_callback=self.log,
+                    process_callback=lambda p: setattr(self, 'proc_split', p),
+                    bitrate=self.split_bitrate_var.get(),
+                    fps=self.split_fps_var.get(),
+                    width=self.split_width_var.get(),
+                    height=self.split_height_var.get(),
+                    out_codec=self.split_codec_var.get(),
+                    input_path2=mask_val if mask_val and os.path.exists(mask_val) else None,
+                    pack_scale=pack_scale_val,
+                    padding=padding_val,
+                    hwaccel=HWACCEL_UI_LABELS.get(self.split_hwaccel_var.get(), "auto")
+                )
             self.log(get_text('msg_task_complete'))
             messagebox.showinfo(get_text('title_success'), get_text('msg_success_split'))
             self.root.after(0, lambda: self.btn_split_start.config(state='normal'))
@@ -1153,7 +1290,17 @@ class VRSplitCombineApp:
         if not in2 or not os.path.exists(in2):
             messagebox.showerror(get_text('title_error'), get_text('msg_error_input_2'))
             return
-        if not out:
+
+        is_batch = os.path.isdir(in1)
+        if is_batch != os.path.isdir(in2):
+            messagebox.showerror(get_text('title_error'), "Input File/Folder 1 and Input File/Folder 2 must both be files, or both be folders.")
+            return
+
+        if is_batch:
+            if not out or not os.path.isdir(out):
+                messagebox.showerror(get_text('title_error'), "Please select an Output Folder for batch (folder) processing.")
+                return
+        elif not out:
              dirname = os.path.dirname(in1)
              filename = os.path.splitext(os.path.basename(in1))[0]
              for s in ["_L", "_R", "_T", "_B", "_l", "_r", "_t", "_b"]:
@@ -1171,22 +1318,40 @@ class VRSplitCombineApp:
         self.btn_combine_stop.config(state='normal')
 
         def task():
-            combine_video(
-                in1,
-                in2,
-                mode,
-                out,
-                conversion=self.combine_conv_var.get(),
-                log_callback=self.log,
-                process_callback=lambda p: setattr(self, 'proc_combine', p),
-                bitrate=self.combine_bitrate_var.get(),
-                mask_path=mask_val if mask_val and os.path.exists(mask_val) else None,
-                fps=self.combine_fps_var.get(),
-                width=self.combine_width_var.get(),
-                height=self.combine_height_var.get(),
-                out_codec=self.combine_codec_var.get(),
-                hwaccel=HWACCEL_UI_LABELS.get(self.combine_hwaccel_var.get(), "auto")
-            )
+            if is_batch:
+                batch_combine_video(
+                    in1,
+                    in2,
+                    mode,
+                    out,
+                    conversion=self.combine_conv_var.get(),
+                    log_callback=self.log,
+                    process_callback=lambda p: setattr(self, 'proc_combine', p),
+                    bitrate=self.combine_bitrate_var.get(),
+                    mask_path=mask_val if mask_val and os.path.exists(mask_val) else None,
+                    fps=self.combine_fps_var.get(),
+                    width=self.combine_width_var.get(),
+                    height=self.combine_height_var.get(),
+                    out_codec=self.combine_codec_var.get(),
+                    hwaccel=HWACCEL_UI_LABELS.get(self.combine_hwaccel_var.get(), "auto")
+                )
+            else:
+                combine_video(
+                    in1,
+                    in2,
+                    mode,
+                    out,
+                    conversion=self.combine_conv_var.get(),
+                    log_callback=self.log,
+                    process_callback=lambda p: setattr(self, 'proc_combine', p),
+                    bitrate=self.combine_bitrate_var.get(),
+                    mask_path=mask_val if mask_val and os.path.exists(mask_val) else None,
+                    fps=self.combine_fps_var.get(),
+                    width=self.combine_width_var.get(),
+                    height=self.combine_height_var.get(),
+                    out_codec=self.combine_codec_var.get(),
+                    hwaccel=HWACCEL_UI_LABELS.get(self.combine_hwaccel_var.get(), "auto")
+                )
             self.log(get_text('msg_task_complete'))
             messagebox.showinfo(get_text('title_success'), get_text('msg_success_combine'))
             self.root.after(0, lambda: self.btn_combine_start.config(state='normal'))
