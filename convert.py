@@ -107,7 +107,9 @@ HWACCEL_UI_LABELS = {
 }
 DEFAULT_HWACCEL_LABEL = "Auto"
 
+@functools.lru_cache(maxsize=32)
 def _ffmpeg_has_encoder(encoder_name):
+    # Cache FFmpeg encoder check to avoid redundant subprocess calls (~200ms per call)
     try:
         result = subprocess.run([FFMPEG_BIN, '-hide_banner', '-encoders'], capture_output=True, text=True, check=False)
     except Exception:
@@ -115,7 +117,9 @@ def _ffmpeg_has_encoder(encoder_name):
     output = (result.stdout or '') + (result.stderr or '')
     return encoder_name in output
 
+@functools.lru_cache(maxsize=32)
 def _ffmpeg_has_filter(filter_name):
+    # Cache FFmpeg filter check to avoid redundant subprocess calls (~200ms per call)
     try:
         result = subprocess.run([FFMPEG_BIN, '-hide_banner', '-filters'], capture_output=True, text=True, check=False)
     except Exception:
