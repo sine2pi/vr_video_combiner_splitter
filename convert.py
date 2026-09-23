@@ -157,9 +157,9 @@ def get_codec_opts(out_codec, bitrate, include_audio=False):
             opts.extend(cbr_opts.split())
     else:
         if _ffmpeg_has_encoder("hevc_nvenc"):
-            opts.extend(["-c:v", "hevc_nvenc", "-profile:v", "main10", "-pix_fmt", "p010le", "-b_ref_mode", "disabled", "-tag:v", "hvc1", "-g", "30", "-rc", "cbr", "-b:v", bitrate, "-maxrate", bitrate, "-bufsize", bitrate])
+            opts.extend(["-c:v", "hevc_nvenc", "-profile:v", "main", "-pix_fmt", "yuv420p", "-b_ref_mode", "disabled", "-tag:v", "hvc1", "-g", "20", "-rc", "cbr", "-b:v", bitrate])
         elif _ffmpeg_has_encoder("libx265"):
-            opts.extend(["-c:v", "libx265", "-preset", "slow", "-crf", "20", "-pix_fmt", "yuv420p"])
+            opts.extend(["-c:v", "libx265", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p"])
         else:
             opts.extend(["-c:v", "hevc", "-pix_fmt", "yuv420p"])
 
@@ -174,7 +174,6 @@ def get_ext_from_codec(out_codec, original_ext):
         return "." + CODEC_OPTIONS_DICT[out_codec].get("ext", [original_ext.lstrip('.')])[0]
     return original_ext
 
-@functools.lru_cache(maxsize=16)
 def get_circle_mask(size: int) -> str:
 
     tmp_dir = Path(tempfile.gettempdir())
@@ -207,7 +206,7 @@ def get_circle_mask(size: int) -> str:
 
     return str(mask_path)
 
-def split_video(input_path, mode, output_dir, conversion="none", log_callback=None, process_callback=None, bitrate="100M", fps=None, height=None, width=None, out_codec="h265-main10-win-nvidia", input_path2=None, pack_scale=0.40, padding=0, hwaccel="auto"):
+def split_video(input_path, mode, output_dir, conversion="none", log_callback=None, process_callback=None, bitrate="60M", fps=None, height=None, width=None, out_codec="h265-main10-win-nvidia", input_path2=None, pack_scale=0.40, padding=0, hwaccel="auto", degrees_in=180, degrees_out=180):
 
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -238,23 +237,23 @@ def split_video(input_path, mode, output_dir, conversion="none", log_callback=No
 
     decoder_opts = get_decoder_opts(codec, hwaccel)
 
+    degrees_in = aorb(degrees_in, 180)
+    degrees_out = aorb(degrees_out, 180)
+
+    if not have(degrees_in):
+        degrees_in = 180
+    if not have(degrees_out):
+        degrees_out = 180
+
     v360_filter = ""
     fisheye_suffix = ""
-    if conversion == "to_fisheye":
-        v360_filter = f",{filter_name}=hequirect:fisheye{dim_str}"
-        fisheye_suffix = "_FE180"
-    elif conversion == "to_fisheye190":
-        v360_filter = f",{filter_name}=input=hequirect:ih_fov=180:iv_fov=180:output=fisheye:h_fov=190:v_fov=190{dim_str}"
-        fisheye_suffix = "_FE190"
-    elif conversion == "to_hequirect":
-        v360_filter = f",{filter_name}=fisheye:hequirect{dim_str}"
-        fisheye_suffix = "_180"
+    if conversion == "to_hequirect":
+        v360_filter = f",{filter_name}=input=fisheye:output=hequirect:iv_fov={degrees_in}:ih_fov={degrees_in}:v_fov={degrees_out}:h_fov={degrees_out}{dim_str}"
     elif conversion == "heq_to_flat":
-        v360_filter = f",{filter_name}=hequirect:sg:v_fov=60:h_fov=60{dim_str}"
-        fisheye_suffix = "_flat"
-    elif conversion == "fish_to_flat":
-        v360_filter = f",{filter_name}=fisheye:sg:v_fov=60:h_fov=60{dim_str}"
-        fisheye_suffix = "_flat"
+        v360_filter = f",{filter_name}=input=hequirect:output=sg:ih_fov={degrees_in}:iv_fov={degrees_in}{dim_str}"
+    elif conversion == "to_fisheye_custom":
+        v360_filter = f",{filter_name}=input=hequirect:output=fisheye:iv_fov={degrees_in}:ih_fov={degrees_in}:v_fov={degrees_out}:h_fov={degrees_out}{dim_str}"
+        fisheye_suffix = f"_fisheye{int(degrees_out)}"
 
     if mode == 'pack':
         if not input_path2 or not os.path.exists(input_path2):
@@ -447,13 +446,16 @@ def split_video(input_path, mode, output_dir, conversion="none", log_callback=No
 
     return True
 
-def combine_video(input_path_1, input_path_2, mode, output_path, conversion="none", log_callback=None, process_callback=None, bitrate="100M", mask_path=None, fps=None, height=None, width=None, out_codec="h265-main10-win-nvidia", hwaccel="auto"):
+def combine_video(input_path_1, input_path_2, mode, output_path, conversion="none", log_callback=None, process_callback=None, bitrate="60M", mask_path=None, fps=None, height=None, width=None, out_codec="h265-main10-win-nvidia", hwaccel="auto", degrees_in=180, degrees_out=180):
 
     if log_callback: log_callback(f"Combining {input_path_1} and {input_path_2} into {output_path} (Mode: {mode}, Conv: {conversion})")
 
+    degrees_in = aorb(degrees_in, 180)
+    degrees_out = aorb(degrees_out, 180)
     fps = frame_rate(input_path_1) if not have(fps) else fps
     codec1 = vcodec(input_path_1)
     w_in, h_in = vresolution(input_path_1)
+    wi, hi = w_in, h_in
 
     w_in = w_in * 2 if mode == "left_right" else w_in
     h_in = h_in * 2 if mode == "top_bottom" else h_in
@@ -469,16 +471,12 @@ def combine_video(input_path_1, input_path_2, mode, output_path, conversion="non
     input_opts_2 = get_decoder_opts(codec2, hwaccel)
 
     v360_filter = ""
-    if conversion == "to_fisheye":
-        v360_filter = f"{filter_name}=hequirect:fisheye{dim_str},"
-    elif conversion == "to_fisheye190":
-        v360_filter = f"{filter_name}=input=hequirect:ih_fov=180:iv_fov=180:output=fisheye:h_fov=190:v_fov=190{dim_str},"
-    elif conversion == "to_hequirect":
-        v360_filter = f"{filter_name}=fisheye:hequirect{dim_str},"
+    if conversion == "to_hequirect":
+        v360_filter = f",{filter_name}=input=fisheye:output=hequirect:iv_fov={degrees_in}:ih_fov={degrees_in}:v_fov={degrees_out}:h_fov={degrees_out}{dim_str},"
     elif conversion == "heq_to_flat":
-        v360_filter = f"{filter_name}=hequirect:sg:v_fov=60:h_fov=60{dim_str},"
-    elif conversion == "fish_to_flat":
-        v360_filter = f"{filter_name}=fisheye:sg:v_fov=60:h_fov=60{dim_str},"
+        v360_filter = f",{filter_name}=input=hequirect:output=sg:ih_fov={degrees_in}:iv_fov={degrees_in}{dim_str},"
+    elif conversion == "to_fisheye_custom":
+        v360_filter = f",{filter_name}=input=hequirect:output=fisheye:iv_fov={degrees_in}:ih_fov={degrees_in}:v_fov={degrees_out}:h_fov={degrees_out}{dim_str},"
 
     if mask_path is not None:
         idx2 = 2
@@ -530,9 +528,11 @@ def combine_video(input_path_1, input_path_2, mode, output_path, conversion="non
     run_process(cmd, log_callback, process_callback)
     return True
 
-def tb_to_sbs(input_path, output_path, conversion="none", log_callback=None, process_callback=None, bitrate="100M", operation_mode="custom_tb_to_sbs", mask_path=None, fps=None, height=None, width=None, out_codec="h265-main10-win-nvidia", hwaccel="auto"):
+def tb_to_sbs(input_path, output_path, conversion="none", log_callback=None, process_callback=None, bitrate="60M", operation_mode="custom_tb_to_sbs", mask_path=None, fps=None, height=None, width=None, out_codec="h265-main10-win-nvidia", hwaccel="auto", degrees_in=180, degrees_out=180):
     if log_callback: log_callback(f"Converting video for {input_path} (conv={conversion}, op={operation_mode})")
 
+    degrees_in = aorb(degrees_in, 180)
+    degrees_out = aorb(degrees_out, 180)
     fps = frame_rate(input_path) if not have(fps) else fps
     codec = vcodec(input_path)
     w_in, h_in = vresolution(input_path)
@@ -565,16 +565,12 @@ def tb_to_sbs(input_path, output_path, conversion="none", log_callback=None, pro
         cmd.extend(["-i", mask_path])
 
     v360_filter = ""
-    if conversion == "to_fisheye":
-        v360_filter = f",{filter_name}=hequirect:fisheye{dim_str}"
-    elif conversion == "to_fisheye190":
-        v360_filter = f",{filter_name}=input=hequirect:ih_fov=180:iv_fov=180:output=fisheye:h_fov=190:v_fov=190{dim_str}"
-    elif conversion == "to_hequirect":
-        v360_filter = f",{filter_name}=fisheye:hequirect{dim_str}"
+    if conversion == "to_hequirect":
+        v360_filter = f",{filter_name}=input=fisheye:output=hequirect:iv_fov={degrees_in}:ih_fov={degrees_in}:v_fov={degrees_out}:h_fov={degrees_out}{dim_str}"
     elif conversion == "heq_to_flat":
-        v360_filter = f",{filter_name}=hequirect:sg:v_fov=60:h_fov=60{dim_str}"
-    elif conversion == "fish_to_flat":
-        v360_filter = f",{filter_name}=fisheye:sg:v_fov=60:h_fov=60{dim_str}"
+        v360_filter = f",{filter_name}=input=hequirect:output=sg:ih_fov={degrees_in}:iv_fov={degrees_in}{dim_str}"
+    elif conversion == "to_fisheye_custom":
+        v360_filter = f",{filter_name}=input=hequirect:output=fisheye:iv_fov={degrees_in}:ih_fov={degrees_in}:v_fov={degrees_out}:h_fov={degrees_out}{dim_str}"
 
     base_filter = ""
     if operation_mode == "sbs_to_sbs":
@@ -633,7 +629,7 @@ def tb_to_sbs(input_path, output_path, conversion="none", log_callback=None, pro
     run_process(cmd, log_callback, process_callback)
     return True
 
-def batch_tb_to_sbs(input_dir, output_dir=None, conversion="none", log_callback=None, process_callback=None, bitrate="100M", operation_mode="custom_tb_to_sbs", mask_path=None, fps=None, height=None, width=None, out_codec="h265-main10-win-nvidia", hwaccel="auto"):
+def batch_tb_to_sbs(input_dir, output_dir=None, conversion="none", log_callback=None, process_callback=None, bitrate="60M", operation_mode="custom_tb_to_sbs", mask_path=None, fps=None, height=None, width=None, out_codec="h265-main10-win-nvidia", hwaccel="auto", degrees_in=180, degrees_out=180):
 
     width = 'iw' if not have(width) else width
     height = 'ih' if not have(height) else height
@@ -647,7 +643,7 @@ def batch_tb_to_sbs(input_dir, output_dir=None, conversion="none", log_callback=
         return False
 
     for input_path in mp4_files:
-        if "_LR" in input_path or "_FE180" in input_path or "_FE190" in input_path or "_180" in input_path or ".restored" in input_path:
+        if "_LR" in input_path or "_FISHEYE_180" in input_path or "_FISHEYE_190" in input_path or "_SBS_180" in input_path or ".restored" in input_path:
             continue
 
         filename = os.path.splitext(os.path.basename(input_path))[0]
@@ -659,14 +655,12 @@ def batch_tb_to_sbs(input_dir, output_dir=None, conversion="none", log_callback=
         else:
             suffix += "_LR"
 
-        if conversion == "to_fisheye":
-            suffix = "_FE180" + suffix
-        elif conversion == "to_fisheye190":
-            suffix = "_FE190" + suffix
-        elif conversion == "to_hequirect":
-            suffix = "_180" + suffix
-        elif conversion == "heq_to_flat" or conversion == "fish_to_flat":
-            suffix = "_flat" + suffix
+        if conversion == "to_hequirect":
+            suffix = f"_SBS_{int(degrees_out)}" + suffix
+        elif conversion == "heq_to_flat":
+            suffix = f"_flat{int(degrees_in)}" + suffix
+        elif conversion == "to_fisheye_custom":
+            suffix = f"_FISHEYE_{int(degrees_out)}" + suffix
 
         ext_out = get_ext_from_codec(out_codec, ".mp4")
         output_path = os.path.join(out_dir, f"{filename}{suffix}{ext_out}")
@@ -675,7 +669,7 @@ def batch_tb_to_sbs(input_dir, output_dir=None, conversion="none", log_callback=
             if log_callback: log_callback(f"Skipping {os.path.basename(input_path)}, output {os.path.basename(output_path)} already exists.")
             continue
 
-        tb_to_sbs(input_path, output_path, conversion=conversion, log_callback=log_callback, process_callback=process_callback, bitrate=bitrate, operation_mode=operation_mode, mask_path=mask_path, fps=fps, height=height, width=width, out_codec=out_codec, hwaccel=hwaccel)
+        tb_to_sbs(input_path, output_path, conversion=conversion, log_callback=log_callback, process_callback=process_callback, bitrate=bitrate, operation_mode=operation_mode, mask_path=mask_path, fps=fps, height=height, width=width, out_codec=out_codec, hwaccel=hwaccel, degrees_in=degrees_in, degrees_out=degrees_out)
 
         get_video_info.cache_clear()
 
@@ -701,7 +695,7 @@ def find_mask_for_video(video_path, mask_dir):
             return candidate
     return None
 
-def batch_split_video(input_dir, mode, output_dir, mask_dir=None, conversion="none", log_callback=None, process_callback=None, bitrate="100M", fps=None, height=None, width=None, out_codec="h265-main10-win-nvidia", pack_scale=0.40, padding=0, hwaccel="auto"):
+def batch_split_video(input_dir, mode, output_dir, mask_dir=None, conversion="none", log_callback=None, process_callback=None, bitrate="60M", fps=None, height=None, width=None, out_codec="h265-main10-win-nvidia", pack_scale=0.40, padding=0, hwaccel="auto", degrees_in=180, degrees_out=180):
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
@@ -727,7 +721,7 @@ def batch_split_video(input_dir, mode, output_dir, mask_dir=None, conversion="no
                 input_path, mode, output_dir,
                 conversion=conversion, log_callback=log_callback, process_callback=process_callback,
                 bitrate=bitrate, fps=fps, height=height, width=width, out_codec=out_codec,
-                input_path2=mask_path, pack_scale=pack_scale, padding=padding, hwaccel=hwaccel
+                input_path2=mask_path, pack_scale=pack_scale, padding=padding, hwaccel=hwaccel, degrees_in=degrees_in, degrees_out=degrees_out
             )
         except Exception as e:
             if log_callback: log_callback(f"Error processing {os.path.basename(input_path)}: {e}")
@@ -737,7 +731,7 @@ def batch_split_video(input_dir, mode, output_dir, mask_dir=None, conversion="no
     if log_callback: log_callback("Batch split finished.")
     return True
 
-def batch_combine_video(input_dir1, input_dir2, mode, output_dir, conversion="none", log_callback=None, process_callback=None, bitrate="100M", mask_path=None, fps=None, height=None, width=None, out_codec="h265-main10-win-nvidia", hwaccel="auto"):
+def batch_combine_video(input_dir1, input_dir2, mode, output_dir, conversion="none", log_callback=None, process_callback=None, bitrate="60M", mask_path=None, fps=None, height=None, width=None, out_codec="h265-main10-win-nvidia", hwaccel="auto", degrees_in=180, degrees_out=180):
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
@@ -774,7 +768,7 @@ def batch_combine_video(input_dir1, input_dir2, mode, output_dir, conversion="no
                 in1, in2, mode, output_path,
                 conversion=conversion, log_callback=log_callback, process_callback=process_callback,
                 bitrate=bitrate, mask_path=mask_path, fps=fps, height=height, width=width,
-                out_codec=out_codec, hwaccel=hwaccel
+                out_codec=out_codec, hwaccel=hwaccel, degrees_in=degrees_in, degrees_out=degrees_out
             )
         except Exception as e:
             if log_callback: log_callback(f"Error combining {filename}: {e}")
@@ -836,11 +830,11 @@ TRANSLATIONS = {
         'title_success': "Success",
         'lbl_conversion': "Projection Conversion:",
         'conv_none': "None (Keep Original)",
-        'conv_to_fisheye': "To Fisheye (Hequirect -> Fisheye)",
-        'conv_to_fisheye190': "To Fisheye 190 (Hequirect -> Fisheye 190°)",
-        'conv_to_hequirect': "To Hequirect (Fisheye -> Hequirect)",
-        'conv_heq_to_flat': "To Flat (Hequirect -> Rectilinear Wide)",
-        'conv_fish_to_flat': "To Flat (Fisheye -> Rectilinear Wide)",
+        'conv_to_hequirect': "Fisheye -> Hequirect",
+        'conv_heq_to_flat': "Hequirect -> Rectilinear Wide",
+        'conv_to_fisheye_custom': "Hequirect -> Fisheye",
+        'lbl_degrees_in': "Degrees In:",
+        'lbl_degrees_out': "Degrees Out:",
         'lbl_bitrate': "Bitrate:",
         'grp_convert_op': "Operation Mode",
         'op_custom_tb_sbs': "Custom Top-Bottom (25% cropped) to SBS",
@@ -954,11 +948,18 @@ class VRSplitCombineApp:
         frame_conv.pack(fill='x', pady=10)
         self.split_conv_var = tk.StringVar(value="none")
         ttk.Radiobutton(frame_conv, text=get_text('conv_none'), variable=self.split_conv_var, value="none").pack(anchor='w')
-        ttk.Radiobutton(frame_conv, text=get_text('conv_to_fisheye'), variable=self.split_conv_var, value="to_fisheye").pack(anchor='w')
-        ttk.Radiobutton(frame_conv, text=get_text('conv_to_fisheye190'), variable=self.split_conv_var, value="to_fisheye190").pack(anchor='w')
         ttk.Radiobutton(frame_conv, text=get_text('conv_to_hequirect'), variable=self.split_conv_var, value="to_hequirect").pack(anchor='w')
         ttk.Radiobutton(frame_conv, text=get_text('conv_heq_to_flat'), variable=self.split_conv_var, value="heq_to_flat").pack(anchor='w')
-        ttk.Radiobutton(frame_conv, text=get_text('conv_fish_to_flat'), variable=self.split_conv_var, value="fish_to_flat").pack(anchor='w')
+        ttk.Radiobutton(frame_conv, text=get_text('conv_to_fisheye_custom'), variable=self.split_conv_var, value="to_fisheye_custom").pack(anchor='w')
+
+        frame_degrees = ttk.Frame(self.tab_split)
+        frame_degrees.pack(fill='x', pady=(0, 5))
+        ttk.Label(frame_degrees, text=get_text('lbl_degrees_in')).pack(side='left')
+        self.split_degrees_in_var = tk.StringVar(value="180")
+        ttk.Entry(frame_degrees, textvariable=self.split_degrees_in_var, width=8).pack(side='left', padx=5)
+        ttk.Label(frame_degrees, text=get_text('lbl_degrees_out')).pack(side='left')
+        self.split_degrees_out_var = tk.StringVar(value="180")
+        ttk.Entry(frame_degrees, textvariable=self.split_degrees_out_var, width=8).pack(side='left', padx=5)
 
         frame_bitrate = ttk.Frame(self.tab_split)
         frame_bitrate.pack(fill='x', pady=5)
@@ -1050,11 +1051,18 @@ class VRSplitCombineApp:
         frame_conv.pack(fill='x', pady=10)
         self.combine_conv_var = tk.StringVar(value="none")
         ttk.Radiobutton(frame_conv, text=get_text('conv_none'), variable=self.combine_conv_var, value="none").pack(anchor='w')
-        ttk.Radiobutton(frame_conv, text=get_text('conv_to_fisheye'), variable=self.combine_conv_var, value="to_fisheye").pack(anchor='w')
-        ttk.Radiobutton(frame_conv, text=get_text('conv_to_fisheye190'), variable=self.combine_conv_var, value="to_fisheye190").pack(anchor='w')
         ttk.Radiobutton(frame_conv, text=get_text('conv_to_hequirect'), variable=self.combine_conv_var, value="to_hequirect").pack(anchor='w')
         ttk.Radiobutton(frame_conv, text=get_text('conv_heq_to_flat'), variable=self.combine_conv_var, value="heq_to_flat").pack(anchor='w')
-        ttk.Radiobutton(frame_conv, text=get_text('conv_fish_to_flat'), variable=self.combine_conv_var, value="fish_to_flat").pack(anchor='w')
+        ttk.Radiobutton(frame_conv, text=get_text('conv_to_fisheye_custom'), variable=self.combine_conv_var, value="to_fisheye_custom").pack(anchor='w')
+
+        frame_degrees = ttk.Frame(self.tab_combine)
+        frame_degrees.pack(fill='x', pady=(0, 5))
+        ttk.Label(frame_degrees, text=get_text('lbl_degrees_in')).pack(side='left')
+        self.combine_degrees_in_var = tk.StringVar(value="180")
+        ttk.Entry(frame_degrees, textvariable=self.combine_degrees_in_var, width=8).pack(side='left', padx=5)
+        ttk.Label(frame_degrees, text=get_text('lbl_degrees_out')).pack(side='left')
+        self.combine_degrees_out_var = tk.StringVar(value="180")
+        ttk.Entry(frame_degrees, textvariable=self.combine_degrees_out_var, width=8).pack(side='left', padx=5)
 
         frame_bitrate = ttk.Frame(self.tab_combine)
         frame_bitrate.pack(fill='x', pady=5)
@@ -1122,11 +1130,18 @@ class VRSplitCombineApp:
         frame_conv.pack(fill='x', pady=10)
         self.convert_conv_var = tk.StringVar(value="none")
         ttk.Radiobutton(frame_conv, text=get_text('conv_none'), variable=self.convert_conv_var, value="none").pack(anchor='w')
-        ttk.Radiobutton(frame_conv, text=get_text('conv_to_fisheye'), variable=self.convert_conv_var, value="to_fisheye").pack(anchor='w')
-        ttk.Radiobutton(frame_conv, text=get_text('conv_to_fisheye190'), variable=self.convert_conv_var, value="to_fisheye190").pack(anchor='w')
         ttk.Radiobutton(frame_conv, text=get_text('conv_to_hequirect'), variable=self.convert_conv_var, value="to_hequirect").pack(anchor='w')
         ttk.Radiobutton(frame_conv, text=get_text('conv_heq_to_flat'), variable=self.convert_conv_var, value="heq_to_flat").pack(anchor='w')
-        ttk.Radiobutton(frame_conv, text=get_text('conv_fish_to_flat'), variable=self.convert_conv_var, value="fish_to_flat").pack(anchor='w')
+        ttk.Radiobutton(frame_conv, text=get_text('conv_to_fisheye_custom'), variable=self.convert_conv_var, value="to_fisheye_custom").pack(anchor='w')
+
+        frame_degrees = ttk.Frame(self.tab_convert)
+        frame_degrees.pack(fill='x', pady=(0, 5))
+        ttk.Label(frame_degrees, text=get_text('lbl_degrees_in')).pack(side='left')
+        self.convert_degrees_in_var = tk.StringVar(value="180")
+        ttk.Entry(frame_degrees, textvariable=self.convert_degrees_in_var, width=8).pack(side='left', padx=5)
+        ttk.Label(frame_degrees, text=get_text('lbl_degrees_out')).pack(side='left')
+        self.convert_degrees_out_var = tk.StringVar(value="180")
+        ttk.Entry(frame_degrees, textvariable=self.convert_degrees_out_var, width=8).pack(side='left', padx=5)
 
         frame_bitrate = ttk.Frame(self.tab_convert)
         frame_bitrate.pack(fill='x', pady=5)
@@ -1227,6 +1242,8 @@ class VRSplitCombineApp:
         def task():
             pack_scale_val = float(self.split_pack_scale_var.get()) if self.split_pack_scale_var.get() else 0.40
             padding_val = int(self.split_padding_var.get()) if self.split_padding_var.get() else 0
+            degrees_in_val = int(self.split_degrees_in_var.get()) if self.split_degrees_in_var.get() else 180
+            degrees_out_val = int(self.split_degrees_out_var.get()) if self.split_degrees_out_var.get() else 180
             if is_batch:
                 batch_split_video(
                     input_path,
@@ -1243,7 +1260,9 @@ class VRSplitCombineApp:
                     out_codec=self.split_codec_var.get(),
                     pack_scale=pack_scale_val,
                     padding=padding_val,
-                    hwaccel=HWACCEL_UI_LABELS.get(self.split_hwaccel_var.get(), "auto")
+                    hwaccel=HWACCEL_UI_LABELS.get(self.split_hwaccel_var.get(), "auto"),
+                    degrees_in=degrees_in_val,
+                    degrees_out=degrees_out_val
                 )
             else:
                 split_video(
@@ -1261,7 +1280,9 @@ class VRSplitCombineApp:
                     input_path2=mask_val if mask_val and os.path.exists(mask_val) else None,
                     pack_scale=pack_scale_val,
                     padding=padding_val,
-                    hwaccel=HWACCEL_UI_LABELS.get(self.split_hwaccel_var.get(), "auto")
+                    hwaccel=HWACCEL_UI_LABELS.get(self.split_hwaccel_var.get(), "auto"),
+                    degrees_in=degrees_in_val,
+                    degrees_out=degrees_out_val
                 )
             self.log(get_text('msg_task_complete'))
             messagebox.showinfo(get_text('title_success'), get_text('msg_success_split'))
@@ -1318,6 +1339,8 @@ class VRSplitCombineApp:
         self.btn_combine_stop.config(state='normal')
 
         def task():
+            degrees_in_val = int(self.combine_degrees_in_var.get()) if self.combine_degrees_in_var.get() else 180
+            degrees_out_val = int(self.combine_degrees_out_var.get()) if self.combine_degrees_out_var.get() else 180
             if is_batch:
                 batch_combine_video(
                     in1,
@@ -1333,7 +1356,9 @@ class VRSplitCombineApp:
                     width=self.combine_width_var.get(),
                     height=self.combine_height_var.get(),
                     out_codec=self.combine_codec_var.get(),
-                    hwaccel=HWACCEL_UI_LABELS.get(self.combine_hwaccel_var.get(), "auto")
+                    hwaccel=HWACCEL_UI_LABELS.get(self.combine_hwaccel_var.get(), "auto"),
+                    degrees_in=degrees_in_val,
+                    degrees_out=degrees_out_val
                 )
             else:
                 combine_video(
@@ -1350,7 +1375,9 @@ class VRSplitCombineApp:
                     width=self.combine_width_var.get(),
                     height=self.combine_height_var.get(),
                     out_codec=self.combine_codec_var.get(),
-                    hwaccel=HWACCEL_UI_LABELS.get(self.combine_hwaccel_var.get(), "auto")
+                    hwaccel=HWACCEL_UI_LABELS.get(self.combine_hwaccel_var.get(), "auto"),
+                    degrees_in=degrees_in_val,
+                    degrees_out=degrees_out_val
                 )
             self.log(get_text('msg_task_complete'))
             messagebox.showinfo(get_text('title_success'), get_text('msg_success_combine'))
@@ -1383,6 +1410,8 @@ class VRSplitCombineApp:
         self.btn_convert_stop.config(state='normal')
 
         def task():
+            degrees_in_val = int(self.convert_degrees_in_var.get()) if self.convert_degrees_in_var.get() else 180
+            degrees_out_val = int(self.convert_degrees_out_var.get()) if self.convert_degrees_out_var.get() else 180
             if os.path.isdir(in_path):
                 output_dir = out_path if out_path and os.path.isdir(out_path) else None
                 batch_tb_to_sbs(
@@ -1398,7 +1427,9 @@ class VRSplitCombineApp:
                     width=self.convert_width_var.get(),
                     height=self.convert_height_var.get(),
                     out_codec=self.convert_codec_var.get(),
-                    hwaccel=HWACCEL_UI_LABELS.get(self.convert_hwaccel_var.get(), "auto")
+                    hwaccel=HWACCEL_UI_LABELS.get(self.convert_hwaccel_var.get()),
+                    degrees_in=degrees_in_val,
+                    degrees_out=degrees_out_val
                 )
             else:
                 out_file = out_path
@@ -1411,14 +1442,12 @@ class VRSplitCombineApp:
                      else:
                          suffix += "_LR"
 
-                     if conversion == "to_fisheye":
-                         suffix = "_FE180" + suffix
-                     elif conversion == "to_fisheye190":
-                         suffix = "_FE190" + suffix
-                     elif conversion == "to_hequirect":
-                         suffix = "_180" + suffix
-                     elif conversion == "heq_to_flat" or conversion == "fish_to_flat":
-                         suffix = "_flat" + suffix
+                     if conversion == "to_hequirect":
+                         suffix = f"_SBS_{degrees_out_val}" + suffix
+                     elif conversion == "heq_to_flat":
+                         suffix = f"_flat{degrees_in_val}" + suffix
+                     elif conversion == "to_fisheye_custom":
+                         suffix = f"_FISHEYE_{degrees_out_val}" + suffix
 
                      ext_out = get_ext_from_codec(self.convert_codec_var.get(), ".mp4")
                      out_file = os.path.join(dirname, f"{filename}{suffix}{ext_out}")
@@ -1436,7 +1465,9 @@ class VRSplitCombineApp:
                     width=self.convert_width_var.get(),
                     height=self.convert_height_var.get(),
                     out_codec=self.convert_codec_var.get(),
-                    hwaccel=HWACCEL_UI_LABELS.get(self.convert_hwaccel_var.get(), "auto")
+                    hwaccel=HWACCEL_UI_LABELS.get(self.convert_hwaccel_var.get()),
+                    degrees_in=degrees_in_val,
+                    degrees_out=degrees_out_val
                 )
             self.log(get_text('msg_task_complete'))
             messagebox.showinfo(get_text('title_success'), "Conversion completed!")
