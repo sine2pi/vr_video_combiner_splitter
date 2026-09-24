@@ -1,0 +1,3 @@
+## 2026-09-24 - Consolidated Metadata Retrieval & FFmpeg Capability Caching
+**Learning:** Querying `ffprobe` for format duration and stream properties in separate process invocations added ~70ms overhead per file check. Consolidating into a single JSON query with path normalization (`os.path.abspath`) and `@functools.lru_cache` reduced metadata retrieval latency to ~0.02ms on warm hits. Additionally, caching `ffmpeg -encoders` and `-filters` checks eliminates unnecessary process spawning during codec selection.
+**Action:** Always retrieve all necessary media attributes in a single `ffprobe` call and cache process feature checks when querying CLI binaries.
