@@ -17,11 +17,12 @@ def aborc(a, b, c):
 
 @functools.lru_cache(maxsize=128)
 def get_video_info(file_path):
+    # Consolidate metadata extraction (including duration) into a single cached ffprobe call for performance
     cmd = [
         FFPROBE_BIN,
         '-v', 'error',
         '-select_streams', 'v:0',
-        '-show_entries', 'stream=width,height,codec_name,r_frame_rate',
+        '-show_entries', 'stream=width,height,codec_name,r_frame_rate:format=duration',
         '-of', 'json',
         file_path
     ]
@@ -37,11 +38,15 @@ def get_video_info(file_path):
     width = int(stream.get('width', 0))
     height = int(stream.get('height', 0))
 
+    duration_str = info.get('format', {}).get('duration', '0')
+    duration = float(duration_str) if duration_str else 0.0
+
     return {
         'fps': fps,
         'codec': codec,
         'width': width,
-        'height': height
+        'height': height,
+        'duration': duration
     }
 
 def frame_rate(file_path):
@@ -55,14 +60,8 @@ def vresolution(file_path):
     return info['width'], info['height']
 
 def video_duration(file_path):
-    cmd = [
-        FFPROBE_BIN, '-v', 'error',
-        '-show_entries', 'format=duration',
-        '-of', 'default=noprint_wrappers=1:nokey=1',
-        file_path
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-    return float(result.stdout.strip())
+    # Query consolidated get_video_info cache to eliminate redundant ffprobe process spawns
+    return get_video_info(file_path)['duration']
 
 def run_process(cmd, log_callback, process_callback=None):
     if log_callback:
