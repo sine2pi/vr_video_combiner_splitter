@@ -16,19 +16,19 @@ def aborc(a, b, c):
     return aorb(a, b) if not have(c) else c
 
 @functools.lru_cache(maxsize=128)
-def get_video_info(file_path):
+def _cached_get_video_info(abs_path):
     cmd = [
         FFPROBE_BIN,
         '-v', 'error',
         '-select_streams', 'v:0',
-        '-show_entries', 'stream=width,height,codec_name,r_frame_rate',
+        '-show_entries', 'stream=width,height,codec_name,r_frame_rate:format=duration',
         '-of', 'json',
-        file_path
+        abs_path
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, check=True)
     info = json.loads(result.stdout)
     if 'streams' not in info or not info['streams']:
-        raise ValueError(f"No video streams found in {file_path}")
+        raise ValueError(f"No video streams found in {abs_path}")
     stream = info['streams'][0]
     fps_str = stream.get('r_frame_rate', '30/1')
     num, denom = map(int, fps_str.split('/'))
@@ -36,13 +36,23 @@ def get_video_info(file_path):
     codec = stream.get('codec_name', '')
     width = int(stream.get('width', 0))
     height = int(stream.get('height', 0))
+    duration = float(info.get('format', {}).get('duration', 0.0))
 
     return {
         'fps': fps,
         'codec': codec,
         'width': width,
-        'height': height
+        'height': height,
+        'duration': duration
     }
+
+def get_video_info(file_path):
+    # Path normalization ensures relative and absolute references hit the same LRU cache entry
+    abs_path = os.path.abspath(os.path.normpath(file_path))
+    return _cached_get_video_info(abs_path)
+
+get_video_info.cache_clear = _cached_get_video_info.cache_clear
+get_video_info.cache_info = _cached_get_video_info.cache_info
 
 def frame_rate(file_path):
     return get_video_info(file_path)['fps']
@@ -55,14 +65,8 @@ def vresolution(file_path):
     return info['width'], info['height']
 
 def video_duration(file_path):
-    cmd = [
-        FFPROBE_BIN, '-v', 'error',
-        '-show_entries', 'format=duration',
-        '-of', 'default=noprint_wrappers=1:nokey=1',
-        file_path
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-    return float(result.stdout.strip())
+    # Reuses consolidated LRU-cached ffprobe result, avoiding process spawning overhead
+    return get_video_info(file_path)['duration']
 
 def run_process(cmd, log_callback, process_callback=None):
     if log_callback:
