@@ -16,7 +16,7 @@ def aborc(a, b, c):
     return aorb(a, b) if not have(c) else c
 
 @functools.lru_cache(maxsize=128)
-def get_video_info(file_path):
+def _get_video_info_cached(file_path):
     cmd = [
         FFPROBE_BIN,
         '-v', 'error',
@@ -43,6 +43,11 @@ def get_video_info(file_path):
         'width': width,
         'height': height
     }
+
+def get_video_info(file_path):
+    # Normalize input file path to absolute normalized path to maximize LRU cache hits across equivalent relative/absolute paths
+    norm_path = os.path.abspath(os.path.normpath(file_path))
+    return _get_video_info_cached(norm_path)
 
 def frame_rate(file_path):
     return get_video_info(file_path)['fps']
