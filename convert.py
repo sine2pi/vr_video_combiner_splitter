@@ -679,12 +679,20 @@ def batch_tb_to_sbs(input_dir, output_dir=None, conversion="none", log_callback=
 VIDEO_EXTENSIONS = ('.mp4', '.mkv', '.mov', '.avi', '.webm')
 
 def find_video_files(input_dir, exclude_substrings=None):
-    import glob
+    # Performance Optimization: Single-pass directory listing using os.scandir
+    # avoids performing multiple glob scans per extension in VIDEO_EXTENSIONS.
     files = []
-    for ext in VIDEO_EXTENSIONS:
-        files.extend(glob.glob(os.path.join(input_dir, f"*{ext}")))
     exclude_substrings = exclude_substrings or []
-    files = [f for f in files if not any(s in os.path.basename(f) for s in exclude_substrings)]
+    try:
+        with os.scandir(input_dir) as entries:
+            for entry in entries:
+                if entry.is_file():
+                    name = entry.name
+                    if name.lower().endswith(VIDEO_EXTENSIONS):
+                        if not any(s in name for s in exclude_substrings):
+                            files.append(entry.path)
+    except (FileNotFoundError, NotADirectoryError, PermissionError):
+        pass
     return sorted(files)
 
 def find_mask_for_video(video_path, mask_dir):
