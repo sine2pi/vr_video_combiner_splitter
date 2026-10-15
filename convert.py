@@ -16,7 +16,7 @@ def aborc(a, b, c):
     return aorb(a, b) if not have(c) else c
 
 @functools.lru_cache(maxsize=128)
-def get_video_info(file_path):
+def _get_video_info_cached(file_path):
     cmd = [
         FFPROBE_BIN,
         '-v', 'error',
@@ -43,6 +43,15 @@ def get_video_info(file_path):
         'width': width,
         'height': height
     }
+
+def get_video_info(file_path):
+    # Bolt Performance Optimization: Normalize path to absolute canonical form before hitting LRU cache.
+    # Prevents duplicate ffprobe calls when referencing the same video via relative vs absolute paths (e.g. 'vid.mp4' vs './vid.mp4').
+    normalized_path = os.path.abspath(os.path.normpath(file_path))
+    return _get_video_info_cached(normalized_path)
+
+get_video_info.cache_clear = _get_video_info_cached.cache_clear
+get_video_info.cache_info = _get_video_info_cached.cache_info
 
 def frame_rate(file_path):
     return get_video_info(file_path)['fps']
