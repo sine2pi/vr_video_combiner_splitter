@@ -21,7 +21,7 @@ def get_video_info(file_path):
         FFPROBE_BIN,
         '-v', 'error',
         '-select_streams', 'v:0',
-        '-show_entries', 'stream=width,height,codec_name,r_frame_rate',
+        '-show_entries', 'stream=width,height,codec_name,r_frame_rate,duration:format=duration',
         '-of', 'json',
         file_path
     ]
@@ -41,7 +41,8 @@ def get_video_info(file_path):
         'fps': fps,
         'codec': codec,
         'width': width,
-        'height': height
+        'height': height,
+        'duration': float(info.get('format', {}).get('duration') or stream.get('duration') or '0')
     }
 
 def frame_rate(file_path):
@@ -54,15 +55,9 @@ def vresolution(file_path):
     info = get_video_info(file_path)
     return info['width'], info['height']
 
+# Consolidates duration retrieval into cached get_video_info to avoid redundant ffprobe calls.
 def video_duration(file_path):
-    cmd = [
-        FFPROBE_BIN, '-v', 'error',
-        '-show_entries', 'format=duration',
-        '-of', 'default=noprint_wrappers=1:nokey=1',
-        file_path
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-    return float(result.stdout.strip())
+    return get_video_info(file_path)['duration']
 
 def run_process(cmd, log_callback, process_callback=None):
     if log_callback:
