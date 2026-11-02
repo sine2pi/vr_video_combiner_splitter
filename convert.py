@@ -107,6 +107,8 @@ HWACCEL_UI_LABELS = {
 }
 DEFAULT_HWACCEL_LABEL = "Auto"
 
+# Cache encoder and filter availability checks to prevent spawning redundant ffmpeg subprocesses
+@functools.lru_cache(maxsize=32)
 def _ffmpeg_has_encoder(encoder_name):
     try:
         result = subprocess.run([FFMPEG_BIN, '-hide_banner', '-encoders'], capture_output=True, text=True, check=False)
@@ -115,6 +117,8 @@ def _ffmpeg_has_encoder(encoder_name):
     output = (result.stdout or '') + (result.stderr or '')
     return encoder_name in output
 
+# Cache filter availability checks to prevent spawning redundant ffmpeg subprocesses
+@functools.lru_cache(maxsize=32)
 def _ffmpeg_has_filter(filter_name):
     try:
         result = subprocess.run([FFMPEG_BIN, '-hide_banner', '-filters'], capture_output=True, text=True, check=False)
@@ -678,13 +682,17 @@ def batch_tb_to_sbs(input_dir, output_dir=None, conversion="none", log_callback=
 
 VIDEO_EXTENSIONS = ('.mp4', '.mkv', '.mov', '.avi', '.webm')
 
+# Performance: Use single-pass os.scandir instead of multiple glob.glob passes per extension
 def find_video_files(input_dir, exclude_substrings=None):
-    import glob
-    files = []
-    for ext in VIDEO_EXTENSIONS:
-        files.extend(glob.glob(os.path.join(input_dir, f"*{ext}")))
     exclude_substrings = exclude_substrings or []
-    files = [f for f in files if not any(s in os.path.basename(f) for s in exclude_substrings)]
+    files = []
+    with os.scandir(input_dir) as entries:
+        for entry in entries:
+            if entry.is_file():
+                name = entry.name
+                if name.lower().endswith(VIDEO_EXTENSIONS):
+                    if not any(s in name for s in exclude_substrings):
+                        files.append(entry.path)
     return sorted(files)
 
 def find_mask_for_video(video_path, mask_dir):
