@@ -15,13 +15,15 @@ def aorb(a, b):
 def aborc(a, b, c):
     return aorb(a, b) if not have(c) else c
 
+# Performance optimization: Consolidate metadata extraction (stream info + duration)
+# into a single ffprobe call and cache normalized paths to eliminate redundant subprocesses.
 @functools.lru_cache(maxsize=128)
-def get_video_info(file_path):
+def _cached_get_video_info(file_path):
     cmd = [
         FFPROBE_BIN,
         '-v', 'error',
         '-select_streams', 'v:0',
-        '-show_entries', 'stream=width,height,codec_name,r_frame_rate',
+        '-show_entries', 'stream=width,height,codec_name,r_frame_rate,duration:format=duration',
         '-of', 'json',
         file_path
     ]
@@ -37,12 +39,32 @@ def get_video_info(file_path):
     width = int(stream.get('width', 0))
     height = int(stream.get('height', 0))
 
+    duration = None
+    if 'format' in info and 'duration' in info['format']:
+        try:
+            duration = float(info['format']['duration'])
+        except (ValueError, TypeError):
+            pass
+    if duration is None and 'duration' in stream:
+        try:
+            duration = float(stream['duration'])
+        except (ValueError, TypeError):
+            pass
+
     return {
         'fps': fps,
         'codec': codec,
         'width': width,
-        'height': height
+        'height': height,
+        'duration': duration
     }
+
+def get_video_info(file_path):
+    return _cached_get_video_info(os.path.abspath(os.path.normpath(file_path)))
+
+# Forward cache inspection and clearance methods for backward compatibility
+get_video_info.cache_clear = _cached_get_video_info.cache_clear
+get_video_info.cache_info = _cached_get_video_info.cache_info
 
 def frame_rate(file_path):
     return get_video_info(file_path)['fps']
@@ -55,6 +77,9 @@ def vresolution(file_path):
     return info['width'], info['height']
 
 def video_duration(file_path):
+    info = get_video_info(file_path)
+    if info.get('duration') is not None:
+        return info['duration']
     cmd = [
         FFPROBE_BIN, '-v', 'error',
         '-show_entries', 'format=duration',
