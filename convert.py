@@ -107,6 +107,8 @@ HWACCEL_UI_LABELS = {
 }
 DEFAULT_HWACCEL_LABEL = "Auto"
 
+# Cache FFmpeg feature capability checks to eliminate expensive subprocess invocations (~70-110ms each).
+@functools.lru_cache(maxsize=32)
 def _ffmpeg_has_encoder(encoder_name):
     try:
         result = subprocess.run([FFMPEG_BIN, '-hide_banner', '-encoders'], capture_output=True, text=True, check=False)
@@ -115,6 +117,8 @@ def _ffmpeg_has_encoder(encoder_name):
     output = (result.stdout or '') + (result.stderr or '')
     return encoder_name in output
 
+# Cache FFmpeg filter capability checks to eliminate repeated subprocess invocations.
+@functools.lru_cache(maxsize=32)
 def _ffmpeg_has_filter(filter_name):
     try:
         result = subprocess.run([FFMPEG_BIN, '-hide_banner', '-filters'], capture_output=True, text=True, check=False)
