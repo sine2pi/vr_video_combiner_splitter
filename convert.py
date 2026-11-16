@@ -157,16 +157,16 @@ def get_codec_opts(out_codec, bitrate, include_audio=False):
             opts.extend(cbr_opts.split())
     else:
         if _ffmpeg_has_encoder("hevc_nvenc"):
-            opts.extend(["-c:v", "hevc_nvenc", "-profile:v", "main", "-pix_fmt", "yuv420p", "-b_ref_mode", "disabled", "-tag:v", "hvc1", "-g", "20", "-rc", "cbr", "-b:v", bitrate])
+            opts.extend(["-c:v", "hevc_nvenc", "-profile:v", "main", "-pix_fmt", "yuv420p", "-b_ref_mode", "disabled", "-tag:v", "hvc1", "-g", "20", "-rc", "cbr", "-b:v", bitrate, "-aspect", "2:1"])
         elif _ffmpeg_has_encoder("libx265"):
-            opts.extend(["-c:v", "libx265", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p"])
+            opts.extend(["-c:v", "libx265", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p", "-aspect", "2:1"])
         else:
-            opts.extend(["-c:v", "hevc", "-pix_fmt", "yuv420p"])
+            opts.extend(["-c:v", "hevc", "-pix_fmt", "yuv420p", "-aspect", "2:1"])
 
     if include_audio:
         opts.extend(["-c:a", "aac", "-b:a", "256k"])
 
-    opts.extend(["-avoid_negative_ts", "make_zero", "-fflags", "+genpts"])
+    opts.extend(["-fflags", "+genpts"])
     return opts
 
 def get_ext_from_codec(out_codec, original_ext):
@@ -250,7 +250,7 @@ def split_video(input_path, mode, output_dir, conversion="none", log_callback=No
     if conversion == "to_hequirect":
         v360_filter = f",{filter_name}=input=fisheye:output=hequirect:iv_fov={degrees_in}:ih_fov={degrees_in}:v_fov={degrees_out}:h_fov={degrees_out}{dim_str}"
     elif conversion == "heq_to_flat":
-        v360_filter = f",{filter_name}=input=hequirect:output=sg:ih_fov={degrees_in}:iv_fov={degrees_in}{dim_str}"
+        v360_filter = f",{filter_name}=input=fisheye:output=fisheye:iv_fov={degrees_in}:ih_fov={degrees_in}:v_fov={degrees_out}:h_fov={degrees_out}{dim_str}"
     elif conversion == "to_fisheye_custom":
         v360_filter = f",{filter_name}=input=hequirect:output=fisheye:iv_fov={degrees_in}:ih_fov={degrees_in}:v_fov={degrees_out}:h_fov={degrees_out}{dim_str}"
         fisheye_suffix = f"_fisheye{int(degrees_out)}"
@@ -312,7 +312,7 @@ def split_video(input_path, mode, output_dir, conversion="none", log_callback=No
         parts.append(f"[o2][right_tl]overlay={ov_x_right}:{ov_y_bot}[o3]")
         parts.append(f"[o3][right_tr]overlay={ov_x_left}:{ov_y_bot}[o4]")
         parts.append(f"[o4][right_bl]overlay={ov_x_right}:{ov_y_top}[o5]")
-        parts.append(f"[o5][right_br]overlay={ov_x_left}:{ov_y_top},scale=w={width}:h={height}:flags=bicubic[packed]")
+        parts.append(f"[o5][right_br]overlay={ov_x_left}:{ov_y_top},scale=w={width}:h={height}:flags=lanczos:out_range=pc:threads=0[packed]")
 
         filter_complex = ";".join(parts)
         output_file = os.path.join(output_dir, f"{filename}_ALPHA{fisheye_suffix}{ext}")
@@ -330,12 +330,12 @@ def split_video(input_path, mode, output_dir, conversion="none", log_callback=No
             
         image_dur_args = ["-t", str(src_duration)] if src_duration else []
         cmd.extend(["-loop", "1", *image_dur_args, "-i", circle_mask])
-        cmd.extend(["-sws_flags", "bicubic+full_chroma_int+accurate_rnd+full_chroma_inp"])
+        cmd.extend(["-sws_flags", "lanczos+full_chroma_int+accurate_rnd+full_chroma_inp"])
         cmd.extend(["-filter_complex", filter_complex])
         cmd.extend(["-map", "[packed]", "-map", "0:a?"])
         cmd.extend(["-shortest"])
         cmd.extend(get_codec_opts(out_codec, bitrate, include_audio=True))
-        cmd.extend(["-movflags", "+faststart+write_colr+use_metadata_tags"])
+        cmd.extend(["-movflags", "+faststart+write_colr+use_metadata_tags", "-metadata:s:v:0", "stereo_mode=left_right"])
         cmd.extend([output_file])
 
         if log_callback: log_callback(f"Starting pack (conv={conversion}, scale={pack_scale}, padding={padding}) for {input_path}...")
@@ -346,21 +346,21 @@ def split_video(input_path, mode, output_dir, conversion="none", log_callback=No
         output_left = os.path.join(output_dir, f"{filename}_L{fisheye_suffix}{ext}")
         output_right = os.path.join(output_dir, f"{filename}_R{fisheye_suffix}{ext}")
 
-        filter_complex = f"[0:v]fps={fps},setpts=N/({fps}*TB),split=2[v1][v2];[v1]crop=iw/2:ih:0:(ih-iw/2)/2{v360_filter},scale=w={width}:h={height}:flags=bicubic[left];[v2]crop=iw/2:ih:iw/2:(ih-iw/2)/2{v360_filter},scale=w={width}:h={height}:flags=bicubic[right]"
+        filter_complex = f"[0:v]fps={fps},setpts=N/({fps}*TB),split=2[v1][v2];[v1]crop=iw/2:ih:0:(ih-iw/2)/2{v360_filter},scale=w={width}:h={height}:flags=lanczos:out_range=pc:threads=0[left];[v2]crop=iw/2:ih:iw/2:(ih-iw/2)/2{v360_filter},scale=w={width}:h={height}:flags=lanczos:out_range=pc:threads=0[right]"
 
         cmd = [FFMPEG_BIN, "-hide_banner", "-y"]
         cmd.extend(decoder_opts)
         cmd.extend(["-i", input_path])
-        cmd.extend(["-sws_flags", "bicubic+full_chroma_int+accurate_rnd+full_chroma_inp"])
+        cmd.extend(["-sws_flags", "lanczos+full_chroma_int+accurate_rnd+full_chroma_inp"])
         cmd.extend(["-filter_complex", filter_complex])
         cmd.extend(["-map", "[left]", "-map", "0:a?"])
         cmd.extend(get_codec_opts(out_codec, bitrate, include_audio=True))
-        cmd.extend(["-movflags", "+faststart+write_colr+use_metadata_tags"])
+        cmd.extend(["-movflags", "+faststart+write_colr+use_metadata_tags", "-metadata:s:v:0", "stereo_mode=left_right"])
         cmd.extend([output_left])
 
         cmd.extend(["-map", "[right]", "-map", "0:a?"])
         cmd.extend(get_codec_opts(out_codec, bitrate, include_audio=True))
-        cmd.extend(["-movflags", "+faststart+write_colr+use_metadata_tags"])
+        cmd.extend(["-movflags", "+faststart+write_colr+use_metadata_tags", "-metadata:s:v:0", "stereo_mode=left_right"])
         cmd.extend([output_right])
 
         if log_callback: log_callback(f"Starting split (left_and_right, conv={conversion}) for {input_path}...")
@@ -371,12 +371,12 @@ def split_video(input_path, mode, output_dir, conversion="none", log_callback=No
         output_top = os.path.join(output_dir, f"{filename}_T{fisheye_suffix}{ext}")
         output_bottom = os.path.join(output_dir, f"{filename}_B{fisheye_suffix}{ext}")
 
-        filter_complex = f"[0:v]fps={fps},setpts=N/({fps}*TB),split=2[v1][v2];[v1]crop=ih/2:ih/2:(iw-ih/2)/2:0{v360_filter},scale=w={width}:h={height}:flags=bicubic[top];[v2]crop=ih/2:ih/2:(iw-ih/2)/2:ih/2{v360_filter},scale=w={width}:h={height}:flags=bicubic[bottom]"
+        filter_complex = f"[0:v]fps={fps},setpts=N/({fps}*TB),split=2[v1][v2];[v1]crop=ih/2:ih/2:(iw-ih/2)/2:0{v360_filter},scale=w={width}:h={height}:flags=lanczos:out_range=pc:threads=0[top];[v2]crop=ih/2:ih/2:(iw-ih/2)/2:ih/2{v360_filter},scale=w={width}:h={height}:flags=lanczos:out_range=pc:threads=0[bottom]"
 
         cmd = [FFMPEG_BIN, "-hide_banner", "-y"]
         cmd.extend(decoder_opts)
         cmd.extend(["-i", input_path])
-        cmd.extend(["-sws_flags", "bicubic+full_chroma_int+accurate_rnd+full_chroma_inp"])
+        cmd.extend(["-sws_flags", "lanczos+full_chroma_int+accurate_rnd+full_chroma_inp"])
         cmd.extend(["-filter_complex", filter_complex])
         cmd.extend(["-map", "[top]", "-map", "0:a?"])
 
@@ -426,9 +426,9 @@ def split_video(input_path, mode, output_dir, conversion="none", log_callback=No
         ffmpeg_bin = FFMPEG_BIN
 
         if have(fps):
-            filter_complex = f"[0:v]{crop_filter},{fps_filter},setpts=N/({fps}*TB),scale=w={width}:h={height}:flags=bicubic[v]"
+            filter_complex = f"[0:v]{crop_filter},{fps_filter},setpts=N/({fps}*TB),scale=w={width}:h={height}:flags=lanczos:out_range=pc:threads=0[v]"
         else:
-            filter_complex = f"[0:v]{crop_filter},scale=w={width}:h={height}:flags=bicubic[v]"
+            filter_complex = f"[0:v]{crop_filter},scale=w={width}:h={height}:flags=lanczos:out_range=pc:threads=0[v]"
 
         cmd = [ffmpeg_bin, "-hide_banner", "-y"]
         cmd.extend(decoder_opts)
@@ -447,7 +447,6 @@ def split_video(input_path, mode, output_dir, conversion="none", log_callback=No
     return True
 
 def combine_video(input_path_1, input_path_2, mode, output_path, conversion="none", log_callback=None, process_callback=None, bitrate="60M", mask_path=None, fps=None, height=None, width=None, out_codec="h265-main10-win-nvidia", hwaccel="auto", degrees_in=180, degrees_out=180):
-
     if log_callback: log_callback(f"Combining {input_path_1} and {input_path_2} into {output_path} (Mode: {mode}, Conv: {conversion})")
 
     degrees_in = aorb(degrees_in, 180)
@@ -474,7 +473,7 @@ def combine_video(input_path_1, input_path_2, mode, output_path, conversion="non
     if conversion == "to_hequirect":
         v360_filter = f",{filter_name}=input=fisheye:output=hequirect:iv_fov={degrees_in}:ih_fov={degrees_in}:v_fov={degrees_out}:h_fov={degrees_out}{dim_str},"
     elif conversion == "heq_to_flat":
-        v360_filter = f",{filter_name}=input=hequirect:output=sg:ih_fov={degrees_in}:iv_fov={degrees_in}{dim_str},"
+        v360_filter = f",{filter_name}=input=fisheye:output=fisheye:iv_fov={degrees_in}:ih_fov={degrees_in}:v_fov={degrees_out}:h_fov={degrees_out}{dim_str},"
     elif conversion == "to_fisheye_custom":
         v360_filter = f",{filter_name}=input=hequirect:output=fisheye:iv_fov={degrees_in}:ih_fov={degrees_in}:v_fov={degrees_out}:h_fov={degrees_out}{dim_str},"
 
@@ -497,14 +496,14 @@ def combine_video(input_path_1, input_path_2, mode, output_path, conversion="non
 
     if have(fps):
         if mask_path is not None:
-            filter_complex = f"{base_filter}[stacked];[1:v][stacked]scale2ref[mask][stacked_ref];[stacked_ref][mask]overlay=0:0,{fps_filter},setpts=N/({fps}*TB),scale=w={width}:h={height}:flags=bicubic[v]"
+            filter_complex = f"{base_filter}[stacked];[1:v][stacked]scale2ref[mask][stacked_ref];[stacked_ref][mask]overlay=0:0,{fps_filter},setpts=N/({fps}*TB),scale=w={width}:h={height}:flags=lanczos:out_range=pc:threads=0[v]"
         else:
-            filter_complex = f"{base_filter},{fps_filter},setpts=N/({fps}*TB),scale=w={width}:h={height}:flags=bicubic[v]"
+            filter_complex = f"{base_filter},{fps_filter},setpts=N/({fps}*TB),scale=w={width}:h={height}:flags=lanczos:out_range=pc:threads=0[v]"
     else:
         if mask_path is not None:
-            filter_complex = f"{base_filter}[stacked];[1:v][stacked]scale2ref[mask][stacked_ref];[stacked_ref][mask]overlay=0:0,scale=w={width}:h={height}:flags=bicubic[v]"
+            filter_complex = f"{base_filter}[stacked];[1:v][stacked]scale2ref[mask][stacked_ref];[stacked_ref][mask]overlay=0:0,scale=w={width}:h={height}:flags=lanczos:out_range=pc:threads=0[v]"
         else:
-            filter_complex = f"{base_filter},scale=w={width}:h={height}:flags=bicubic[v]"
+            filter_complex = f"{base_filter},scale=w={width}:h={height}:flags=lanczos:out_range=pc:threads=0[v]"
 
     cmd = [ffmpeg_bin, "-hide_banner", "-y"]
     cmd.extend(input_opts_1)
@@ -520,7 +519,7 @@ def combine_video(input_path_1, input_path_2, mode, output_path, conversion="non
     cmd.extend(fps_opts)
 
     cmd.extend(get_codec_opts(out_codec, bitrate, include_audio=False))
-    cmd.extend(["-movflags", "+faststart"])
+    cmd.extend(["-movflags", "+faststart+write_colr+use_metadata_tags", "-metadata:s:v:0", "stereo_mode=left_right"])
     cmd.extend(["-color_range", "pc", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"])
 
     cmd.extend([output_path])
@@ -568,7 +567,7 @@ def tb_to_sbs(input_path, output_path, conversion="none", log_callback=None, pro
     if conversion == "to_hequirect":
         v360_filter = f",{filter_name}=input=fisheye:output=hequirect:iv_fov={degrees_in}:ih_fov={degrees_in}:v_fov={degrees_out}:h_fov={degrees_out}{dim_str}"
     elif conversion == "heq_to_flat":
-        v360_filter = f",{filter_name}=input=hequirect:output=sg:ih_fov={degrees_in}:iv_fov={degrees_in}{dim_str}"
+        v360_filter = f",{filter_name}=input=fisheye:output=fisheye:iv_fov={degrees_in}:ih_fov={degrees_in}:v_fov={degrees_out}:h_fov={degrees_out}{dim_str}"
     elif conversion == "to_fisheye_custom":
         v360_filter = f",{filter_name}=input=hequirect:output=fisheye:iv_fov={degrees_in}:ih_fov={degrees_in}:v_fov={degrees_out}:h_fov={degrees_out}{dim_str}"
 
@@ -612,9 +611,9 @@ def tb_to_sbs(input_path, output_path, conversion="none", log_callback=None, pro
         fps_opts = ["-fps_mode", "cfr", "-r", str(fps)]
 
     if mask_path is not None:
-        filter_complex = f"{base_filter}[stacked];[1:v][stacked]scale2ref[mask][stacked_ref];[stacked_ref][mask]overlay=0:0,{fps_filter},setpts=N/({fps}*TB),scale=w={width}:h={height}:flags=bicubic[v]"
+        filter_complex = f"{base_filter}[stacked];[1:v][stacked]scale2ref[mask][stacked_ref];[stacked_ref][mask]overlay=0:0,{fps_filter},setpts=N/({fps}*TB),scale=w={width}:h={height}:flags=lanczos:out_range=pc:threads=0[v]"
     else:
-        filter_complex = f"{base_filter},{fps_filter},setpts=N/({fps}*TB),scale=w={width}:h={height}:flags=bicubic[v]"
+        filter_complex = f"{base_filter},{fps_filter},setpts=N/({fps}*TB),scale=w={width}:h={height}:flags=lanczos:out_range=pc:threads=0[v]"
 
     cmd.extend(["-filter_complex", filter_complex])
     cmd.extend(["-map", "[v]"])
@@ -622,7 +621,7 @@ def tb_to_sbs(input_path, output_path, conversion="none", log_callback=None, pro
     cmd.extend(fps_opts)
 
     cmd.extend(get_codec_opts(out_codec, bitrate, include_audio=False))
-    cmd.extend(["-movflags", "+faststart"])
+    cmd.extend(["-movflags", "+faststart+write_colr+use_metadata_tags", "-metadata:s:v:0", "stereo_mode=left_right"])
     cmd.extend(["-color_range", "pc", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"])
 
     cmd.extend([output_path])
